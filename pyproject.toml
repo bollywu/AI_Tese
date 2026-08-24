@@ -1,0 +1,30 @@
+[project]
+name = "aicoverage"
+version = "0.1.0"
+description = "AIcoverage — 面向任意 C/C++ 项目的自动化测试闭环：需求解析 → 测试生成 → 本地执行 → gcov 覆盖率分析 → 迭代补测"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    # 核心流程（配置/构建/gcov 解析/执行/状态机）纯标准库实现，零第三方依赖。
+    # Agent 编排依赖 codebuddy-agent-sdk，采用惰性导入（仅在 LLM 阶段需要），
+    # 因此不放进硬依赖——纯确定性阶段（build/coverage/report）可在任意
+    # python>=3.11 环境运行。
+]
+
+[project.optional-dependencies]
+agent = ["codebuddy-agent-sdk"]
+test = ["pytest"]
+
+[project.scripts]
+aicov = "aicoverage.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["aicoverage*"]
+
+[tool.setuptools.package-data]
+aicoverage = ["prompts/*.md", "badcases/*.md", "templates/*"]

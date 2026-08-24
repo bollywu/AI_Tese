@@ -1,0 +1,42 @@
+# AIcoverage 示例配置：wrk（https://github.com/wg/wrk）
+# 用法：
+#   git clone https://github.com/wg/wrk.git wrk && cd wrk
+#   cp <AIcoverage>/examples/wrk.toml aicoverage.toml   # 或直接把本文件放到 wrk 源码根
+#   aicov build && aicov loop --yes
+
+[project]
+name = "wrk"
+display_name = "wrk"
+language = "c"
+description = "现代 HTTP 压测工具（多线程 + LuaJIT 脚本）"
+
+[source]
+path = "."
+include_globs = ["src/**/*.c"]
+exclude_globs = ["deps/**", "tests/**"]
+
+[build]
+# wrk 的 Makefile 支持 CFLAGS/LDFLAGS 透传；--coverage 让 gcc 生成 .gcno/.gcda
+clean_cmd = "make clean"
+build_cmd = "make CFLAGS='-O0 -g --coverage' LDFLAGS='--coverage' -j4"
+binary = "wrk"
+
+[test]
+dir = "tests"
+python = "auto"
+timeout = 600
+
+[coverage]
+tool = "gcov"
+gcov_bin = "gcov"
+func_target = 100.0
+cond_target = 85.0
+
+[loop]
+max_iter = 6
+no_progress_stop = 2
+
+[llm]
+model = "your-model-name"  # 必填：所用 Agent SDK 支持的模型名
+gen_model = ""
+max_turns = 80

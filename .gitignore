@@ -1,0 +1,15 @@
+# 密钥/本地环境配置
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# 覆盖率采集中间产物
+*.gcda
+*.gcno
+*.gcov.json*
