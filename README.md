@@ -114,7 +114,7 @@ aicov html --run-id LOOP_20260821_155342    # 指定 run
 aicov html --from-json path/to/coverage.json --out ./report
 ```
 
-报告采用经典覆盖率工具（BullseyeCoverage covhtml）的报告形态，纯静态、零第三方依赖，可直接拷走或用 `python3 -m http.server` 打开：
+报告采用经典覆盖率工具的层级下钻式形态（iframe 三栏 + 四列指标），纯静态、零第三方依赖，可直接拷走或用 `python3 -m http.server` 打开：
 
 **布局**：iframe 三栏（左侧可折叠目录树导航 + 可拖动分隔条 + 右侧内容区）
 
@@ -262,8 +262,6 @@ AIcoverage 站在众多优秀开源项目之上，在此一并致谢：
 | [open-code-review](https://github.com/alibaba/open-code-review) | 增量代码扫描（MR 扫描轨 S1 阶段，`ocr review --format json`） | [Alibaba](https://github.com/alibaba) |
 | [wikirize](https://github.com/tmih06/wikirize) | 代码知识库构建方法论（`aicov kb`） | [tmih06](https://github.com/tmih06) |
 | [wrk](https://github.com/wg/wrk) | 默认示例被测项目（`examples/wrk.toml`） | [wg](https://github.com/wg) |
-| BullseyeCoverage covhtml | HTML 覆盖率报告形态参考 | Bullseye Testing Technology |
-
 其中 codegraph 与 open-code-review 分别由 **colbymchenry** 与 **Alibaba** 团队开发维护，wikirize 由 **tmih06** 贡献——它们的开放与智慧让本项目的调用链分析、增量扫描与知识库能力得以实现，向每一位作者致敬。
 
 同时，特别感谢**腾讯 CodeBuddy 团队**：本项目基于 CodeBuddy Agent SDK（`codebuddy-agent-sdk`）构建多 Agent 编排能力，其提供的 Agent 框架、运行环境与配套支持是 AIcoverage 得以落地的基础，感谢腾讯 CodeBuddy 团队在 Agent 工程化方面长期积累与开源分享。

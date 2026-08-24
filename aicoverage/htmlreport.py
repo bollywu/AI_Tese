@@ -1,6 +1,6 @@
-"""HTML 覆盖率报告生成器 —— Bullseye covhtml 风格（零第三方依赖，纯标准库）。
+"""HTML 覆盖率报告生成器（零第三方依赖，纯标准库）。
 
-对齐经典商业覆盖率工具（BullseyeCoverage covhtml）的报告形态，核心特征：
+报告形态为经典覆盖率工具的层级下钻式 HTML（iframe 三栏布局），核心特征：
 
 1. **iframe 三栏布局**：左侧可折叠目录树导航，右侧内容区（可拖动分隔条）
 2. **四列指标体系**（每一层级都有）：
@@ -10,9 +10,9 @@
 4. **源码页**：函数定义行标 ✔（已覆盖）/ ✘（未覆盖），分支行标 `TF`
    （T=true 分支命中、F=false 分支命中，未命中的方向标红），逐行着色
 
-与 Bullseye 的差异（数据源不同导致的必然差异，已在页面注明）：
-- Bullseye 的「条件/决策覆盖」基于其插桩探针；这里用 gcov 的分支（branch）数据等价映射
-- Bullseye 用 png 色块，这里用纯 CSS 进度条（避免二进制资源，报告可纯文本 diff）
+实现说明（数据源为本机 gcov）：
+- 「条件/决策覆盖」由 gcov 的分支（branch）数据等价映射（至少命中一次的分支方向占比）
+- 色条用纯 CSS 进度条实现（避免二进制资源，报告可纯文本 diff）
 
 输出结构：
 
@@ -199,7 +199,7 @@ def _gauge_cls(pct: float) -> str:
 
 
 def _pct_cell(pct: float | None) -> str:
-    """百分比 + CSS 色条（对应 Bullseye 的 w*.png 色块）。"""
+    """百分比 + CSS 色条。"""
     if pct is None:
         return '<td class="num dim">&mdash;</td>'
     return (f'<td class="num"><span class="pctwrap">'
@@ -247,7 +247,7 @@ def _stamp(created: str, project: str, run_id: str) -> str:
 
 
 def _crumb(node: Node, by_rel: dict[str, Node]) -> str:
-    """面包屑：coverage/ dir/ dir/ file.c（对齐 Bullseye 的层级链接）。"""
+    """面包屑：coverage/ dir/ dir/ file.c（层级导航链接）。"""
     links = [f'<a href="d_{_slug("")}.html">{ROOT_LABEL}/</a>']
     if node.rel:
         parts = node.rel.split("/")
@@ -273,7 +273,7 @@ def generate(
     run_id: str = "",
     extra_links: dict[str, str] | None = None,
 ) -> Path:
-    """生成 Bullseye 风格 HTML 报告，返回 index.html（iframe 框架页）路径。"""
+    """生成层级下钻式 HTML 报告，返回 index.html（iframe 框架页）路径。"""
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "style.css").write_text(_STYLE, encoding="utf-8")
 
@@ -344,7 +344,7 @@ def _dir_page(node: Node, by_rel: dict[str, Node], stamp: str,
 
 
 def _file_page(node: Node, fc: FileCov, by_rel: dict[str, Node], stamp: str) -> str:
-    """文件层级页：**每个函数一行**，显示该函数自身的覆盖结果（Bullseye 核心视图）。"""
+    """文件层级页：**每个函数一行**，显示该函数自身的覆盖结果（核心视图）。"""
     src_page = f"s_{_slug(node.rel)}.html"
     rows = [_TABLE_HEAD]
     rows.append(f'<tr class="first"><td class="name">'
@@ -383,7 +383,7 @@ def _file_page(node: Node, fc: FileCov, by_rel: dict[str, Node], stamp: str) -> 
 
 def _source_page(node: Node, fc: FileCov, by_rel: dict[str, Node], stamp: str,
                  source_root: Path) -> str:
-    """源码页：函数定义行标 ✔/✘ + 分支行标 TF + 逐行着色（对齐 Bullseye 源码视图）。"""
+    """源码页：函数定义行标 ✔/✘ + 分支行标 TF + 逐行着色（源码视图）。"""
     body = [stamp, _crumb(node, by_rel), "<hr>"]
     body.append(
         '<p class="legend">行首标记：<b class="fnhit">&#10004;</b> 函数已覆盖 · '
@@ -471,7 +471,7 @@ def _nav_page(root: Node) -> str:
 
 
 def _frame_page(title: str, content_page: str) -> str:
-    """iframe 框架页（左导航 + 可拖动分隔条 + 右内容），对齐 Bullseye index.html。"""
+    """iframe 框架页（左导航 + 可拖动分隔条 + 右内容）。"""
     return f"""<!DOCTYPE html>
 <html lang="zh-CN" style="height:100%"><head><meta charset="utf-8">
 <title>{html.escape(title)}</title>

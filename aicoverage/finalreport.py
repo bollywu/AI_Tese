@@ -397,7 +397,7 @@ def write_final_report(
         L.append(f"- **HTML 覆盖率报告**：`{html_index}`")
         L.append(f"  - 打开方式：`python3 -m http.server 8000 -d {html_index.parent}`"
                  " → 浏览 <http://127.0.0.1:8000/>")
-        L.append("  - 内容：Bullseye covhtml 风格——目录树导航 + 四列指标"
+        L.append("  - 内容：层级下钻式目录树导航 + 四列指标"
                  "（Function coverage / Uncovered functions / Condition-decision"
                  " coverage / Uncovered C-D）+ **每个函数一行的覆盖结果** +"
                  " 源码逐行着色与分支 T/F 标注")

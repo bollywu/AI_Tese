@@ -352,7 +352,7 @@ class TestExecutor:
 
 
 class TestHtmlReport:
-    """Bullseye covhtml 风格报告（iframe 框架 + 四列指标 + 函数级行 + 源码锚点）。"""
+    """层级下钻式 HTML 报告（iframe 框架 + 四列指标 + 函数级行 + 源码锚点）。"""
 
     def _mk_src(self, tmp_path: Path) -> Path:
         src = tmp_path / "src"
@@ -363,7 +363,7 @@ class TestHtmlReport:
             encoding="utf-8")
         return tmp_path
 
-    def test_bullseye_structure(self, tmp_path):
+    def test_hierarchical_structure(self, tmp_path):
         from aicoverage.htmlreport import generate
 
         root = self._mk_src(tmp_path)
