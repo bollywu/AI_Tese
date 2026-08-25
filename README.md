@@ -1,5 +1,7 @@
 # AIcoverage
 
+> **🌐 语言切换 / Language**：[中文（简体）](README.md) · [English](README_EN.md)
+
 面向**任意 C/C++ 项目**的自动化测试覆盖率闭环：**需求解析 → 测试生成 → 本地执行 → gcov 覆盖率分析 → 迭代补测**，直到函数/分支覆盖率达标或触发早停。
 
 > **Acknowledgements / 致谢**：本项目的调用链分析、增量扫描、知识库构建与 Agent 编排，分别得益于 [codegraph](https://github.com/colbymchenry/codegraph)（colbymchenry）、[open-code-review](https://github.com/alibaba/open-code-review)（Alibaba）、[wikirize](https://github.com/tmih06/wikirize)（tmih06）与**腾讯 CodeBuddy 团队**（[Agent SDK](https://www.codebuddy.ai)）的开源贡献。完整清单见文末「[第三方开源依赖与致谢](#第三方开源依赖与致谢)」。
