@@ -57,6 +57,36 @@ def test_xxx(target):
 - 理想用例长度 = docstring + 3~8 行原子函数调用；超过就反思是不是漏了原子函数。
 - 测试点打印只用 `print_test_point_box()`，步骤记录只用 `manual_step()`（harness 已提供）。
 
+## 单测通道（e2e 不可达函数专用）
+
+默认用 `run_binary()` 跑被测二进制（黑盒 E2E）。但某些函数的 gap 根因是
+**N1（特定运行环境/多进程/信号）、N3（错误路径）、N5（死代码/平台相关/无调用点）**，
+它们很难/无法通过被测二进制的正常流程触达。此时走**单测通道**：写一个
+`test_driver_*.c` 直接调用目标函数，用 harness 的 `compile_unit_driver()` 以
+`--coverage` 插桩编译出单测二进制，再用 `run_driver()` 运行，让 gcov 采集到该函数。
+
+```python
+def test_ut_parse_url_invalid():
+    """
+    描述：parse_url 收到非法 URL 时（错误路径，E2E 无法触达）直接调用应返回 -1。
+    测试点：src/url.c:120 parse_url 错误返回分支
+    """
+    res = compile_unit_driver("tests/drivers/test_driver_url.c",
+                              sources=["src/url.c"], out_name="ut_url",
+                              include_dirs=["src"])
+    assert_ut_compiled(res)
+    r = run_driver("ut_url", args=["http://bad"])
+    assert_exit_code(r, 0)
+    assert_stdout_contains(r, "err=-1")
+```
+
+要点：
+- driver 源文件放 `$AICOV_TEST_DIR/drivers/`（如 `test_driver_url.c`），内含 `main`，
+  `#include` 或 extern 声明目标函数并直接调用，可接收 argv 让同一个 driver 走不同分支。
+- `compile_unit_driver` 的 `sources` 填目标函数所在源文件；`include_dirs` 填头文件目录。
+- 单测二进制自动落 `$AICOV_UT_OBJ_DIR`（--coverage 插桩，gcov 采集天然兼容）。
+- 单测只用于补 e2e 不可达的函数；能 E2E 触达的（N4/N6）仍优先 `run_binary`。
+
 ## 执行可审计三要素（缺一不可）
 
 1. **测试点**：`print_test_point_box(what, input_desc, expected)` 打印测什么/输入/预期

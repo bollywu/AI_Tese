@@ -40,6 +40,12 @@ gcov_bin = "gcov"
 func_target = 100.0
 cond_target = 85.0
 
+[unittest]              # 可选：e2e 不可达函数转单测（gap 根因 N1/N3/N5）
+compiler = ""           # 单测编译器（空=跟随 build 体系；建议 gcc / g++）
+flags = ["-O0", "-g", "-Wall"]   # 单测编译附加 flag（会自动追加 --coverage）
+link_libs = []          # 额外链接库，如 ["-lm", "-lpthread"]
+obj_dir = ".aicoverage/ut"       # 单测中间产物目录（.gcno/.gcda 落此）
+
 [loop]
 max_iter = 6
 no_progress_stop = 2
@@ -184,6 +190,102 @@ def run_binary(args, *, stdin: str | None = None, timeout: int = 30,
     return ProcResult(cmd=cmd, rc=proc.returncode, stdout=proc.stdout,
                       stderr=proc.stderr,
                       duration_ms=int((time.time() - start) * 1000))
+
+
+# ── 单元测试通道（e2e 不可达函数转单测）─────────────────────────
+# 背景：某些函数无法通过被测二进制的正常 E2E 流程触达（错误处理路径 N3、
+#       静态初始化、平台特化 N1/N5 等）。此时可写一个 test_driver_*.c 直接
+#       调用目标函数，用 --coverage 插桩编译出单测二进制并运行，让 gcov 采集
+#       到该函数。因为 gcov 按源码树扫 .gcno/.gcda，这套通道与现有采集完全兼容。
+
+def compile_unit_driver(driver_c: Path | str, sources: list[Path | str],
+                        out_name: str = "ut_main",
+                        include_dirs: list[Path | str] | None = None,
+                        *, timeout: int = 120) -> ProcResult:
+    """用 --coverage 插桩编译被测源文件 + driver，链接成单测二进制。
+
+    Args:
+        driver_c: 测试 driver 源码路径（含 main，直接调用目标函数）。
+        sources: 被测源文件列表（目标函数所在 .c/.cc/.cpp）。这些文件必须已经
+            用 --coverage 插桩编译过（或本次用 -fprofile-arcs -ftest-coverage
+            一起编译）——本函数总是追加 --coverage，保证 .gcno 生成。
+        out_name: 输出二进制名（放 AICOV_UT_OBJ_DIR 下）。
+        include_dirs: 额外的头文件搜索目录（相对或绝对）。
+
+    Returns:
+        ProcResult（cmd=编译命令串；rc=0 且产物存在才算成功）。
+    """
+    cc = os.environ.get("AICOV_UT_COMPILER", "gcc")
+    flags = os.environ.get("AICOV_UT_FLAGS", "-O0 -g -Wall").split()
+    link_libs = [x for x in os.environ.get("AICOV_UT_LINK_LIBS", "").split() if x]
+    ut_dir = Path(os.environ.get("AICOV_UT_OBJ_DIR", SRC_ROOT / ".aicoverage" / "ut"))
+    ut_dir.mkdir(parents=True, exist_ok=True)
+    out_bin = ut_dir / out_name
+
+    driver_p = Path(driver_c)
+    if not driver_p.is_absolute():
+        driver_p = SRC_ROOT / driver_p
+    src_list = [str(s if Path(s).is_absolute() else SRC_ROOT / s) for s in sources]
+    inc = []
+    for d in (include_dirs or []):
+        p = Path(d)
+        inc.append(str(p if p.is_absolute() else SRC_ROOT / p))
+
+    # 先编译被测源 → 目标文件（-c 生成 .o + .gcno），再链接 driver 一起出二进制
+    cmd = [cc, "--coverage", *flags]
+    if inc:
+        cmd += ["-I" + d for d in inc]
+    cmd += src_list + [str(driver_p), "-o", str(out_bin), *link_libs]
+    start = time.time()
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                              cwd=str(SRC_ROOT))
+        rc = proc.returncode
+        log = (proc.stdout or "") + ("\n[stderr]\n" + proc.stderr if proc.stderr else "")
+    except subprocess.TimeoutExpired:
+        rc, log = 124, f"TIMEOUT after {timeout}s"
+    if rc == 0 and not out_bin.exists():
+        rc, log = 127, log + f"\n编译成功但产物不存在: {out_bin}"
+    manual_step("compile_unit_driver",
+                call=" ".join(cmd), side_effect=f"产物 {out_bin}",
+                expected="rc=0 且产物存在", observed=f"rc={rc} 产物={'存在' if out_bin.exists() else '缺失'}")
+    return ProcResult(cmd=cmd, rc=rc, stdout=log, stderr="",
+                      duration_ms=int((time.time() - start) * 1000))
+
+
+def run_driver(out_name: str = "ut_main", args: list | None = None, *,
+               timeout: int = 60, env_extra: dict | None = None) -> ProcResult:
+    """运行已编译的单测 driver 二进制（见 compile_unit_driver），返回 ProcResult。
+
+    单测二进制必须由 compile_unit_driver 编译（落 AICOV_UT_OBJ_DIR）。运行后
+    会写 .gcda，gcov 采集即可命中对应目标函数。
+    """
+    ut_dir = Path(os.environ.get("AICOV_UT_OBJ_DIR", SRC_ROOT / ".aicoverage" / "ut"))
+    binary = ut_dir / out_name
+    if not binary.exists():
+        return ProcResult(cmd=[str(binary)], rc=127, stdout="",
+                          stderr=f"单测二进制不存在: {binary}（先调 compile_unit_driver）",
+                          duration_ms=0)
+    cmd = [str(binary), *[str(a) for a in (args or [])]]
+    env = dict(os.environ)
+    if env_extra:
+        env.update({k: str(v) for k, v in env_extra.items()})
+    start = time.time()
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                              env=env, cwd=str(SRC_ROOT))
+        return ProcResult(cmd=cmd, rc=proc.returncode, stdout=proc.stdout,
+                          stderr=proc.stderr,
+                          duration_ms=int((time.time() - start) * 1000))
+    except subprocess.TimeoutExpired:
+        return ProcResult(cmd=cmd, rc=124, stdout="", stderr=f"TIMEOUT after {timeout}s",
+                          duration_ms=int((time.time() - start) * 1000))
+
+
+def assert_ut_compiled(res: ProcResult) -> None:
+    """断言单测 driver 编译成功（rc=0）。"""
+    print(f"  assert_ut_compiled: rc={res.rc}")
+    assert res.rc == 0, f"单测编译失败，编译输出:\n{res.stdout}"
 
 
 # ── 本地测试服务（网络类用例一律自起回环服务，禁止连外网） ────

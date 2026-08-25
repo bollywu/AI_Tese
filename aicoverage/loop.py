@@ -76,6 +76,32 @@ def _prompt_gap(cfg: ProjectConfig, run_id: str, iter_n: int, iter_dir: Path,
 P0（N3/N4/N6）进 items（≤25 个），其余进 noise。"""
 
 
+def _unittest_hint(cfg: ProjectConfig) -> str:
+    """单测通道引导：当缺口根因是 e2e 不可达（N1/N3/N5）时，提示 gen-agent
+    走"直接调用目标函数"的单测通道，而不是死磕 run_binary 黑盒触发。"""
+    cc = cfg.ut_compiler or "（跟随 build 体系，建议 gcc/g++）"
+    return f"""
+## 单测通道（e2e 不可达函数专用）
+若某 gap 根因是 **N1（特定运行环境/多进程/信号）、N3（错误路径）、N5（死代码/平台相关/无调用点）**，
+说明它难以/无法通过被测二进制 $AICOV_BINARY 的正常 E2E 流程触达。此时请走**单测通道**：
+1. 写一个 `test_driver_<主题>.c`（含 main），`#include` 或 extern 声明目标函数，直接调用它并打印返回值/副作用
+2. 用例体调 harness 原子函数：
+   ```python
+   res = compile_unit_driver("tests/drivers/test_driver_<主题>.c",
+                             sources=["src/<目标函数所在文件>.c"],
+                             out_name="ut_<主题>", include_dirs=["src"])
+   assert_ut_compiled(res)
+   r = run_driver("ut_<主题>", args=["..."])   # 传参让 driver 走不同分支
+   assert_exit_code(r, 0)
+   assert_stdout_contains(r, "<预期输出>")
+   ```
+3. driver 源文件放 `tests/drivers/`；单测二进制自动落 `{cfg.ut_obj_path}`（--coverage 插桩，
+   gcov 采集天然兼容）。单测编译器：`{cc}`
+4. 若目标函数依赖项目私有结构体/宏，driver 里 `#include` 对应头文件即可（include_dirs 传头文件目录）。
+注意：单测只用于补 e2e 不可达的函数，能 E2E 触达的（N4/N6）仍优先 run_binary。
+"""
+
+
 def _prompt_gen(cfg: ProjectConfig, run_id: str, iter_n: int, iter_dir: Path,
                 gap_items: list[dict], plan_summary: str,
                 quality_actions: list[dict] | None,
@@ -96,6 +122,7 @@ def _prompt_gen(cfg: ProjectConfig, run_id: str, iter_n: int, iter_dir: Path,
 测试目录：$AICOV_TEST_DIR = {cfg.test_dir}
 harness 原子函数库：{cfg.tests_lib_dir / "harness.py"}（先 Read 它！）
 {wiki_navigation_hint(cfg)}{badcase_hint(cfg)}
+{_unittest_hint(cfg)}
 {plan_part}{fix_part}{ctx_part}## 本轮覆盖缺口（gap_items，按优先级排序）
 {gap_json}
 

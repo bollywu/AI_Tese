@@ -171,6 +171,8 @@ your-project/
 
 **原子函数 → 用例搭积木**：用例体只做"构造数据 → 调 harness 原子函数 → 传给断言原子函数"；需要新验证维度时先扩展 `harness.py` 再让用例调用。
 
+**单测通道（e2e 不可达函数转单测）**：某些函数无法通过被测二进制的正常 E2E 流程触达（gap 根因 N1 特定运行环境/多进程/信号、N3 错误路径、N5 死代码/平台相关/无调用点）。此时 gen-agent 会生成 `test_driver_*.c` 直接调用目标函数，用 harness 的 `compile_unit_driver()`（`--coverage` 插桩）+ `run_driver()` 编译运行单测二进制，让 gcov 采集到该函数。因为 gcov 按源码树扫 `.gcno/.gcda`，单测通道与现有采集完全兼容，无需改采集逻辑。单测编译配置见 `aicoverage.toml` 的 `[unittest]` 段（compiler / flags / link_libs / obj_dir）。
+
 **双层可审查性**（2026-08-24 新增文档头门禁）：
 1. **静态**：每个 `test_*` 函数的 docstring 必须含"描述"（一句话说明验证什么行为）+ "测试点"（对应源码位置与分支）两个字段——reviewer **不用运行代码、只看源码**就能看懂每个用例的目的。这是**确定性门禁**（`aicoverage/docstyle.py`，纯 AST 解析，零 LLM token），由 `loop.py` 在 verify 阶段自动检查并合并进 `verify_report.json`（`EC-07`），缺字段直接判定 fail，回环给 gen-agent 补齐。
 2. **运行时**：执行日志三要素（`print_test_point_box()` 测试点方框 / `manual_step()` 真实观测 / 断言 expected-vs-observed）保证 reviewer 需要复核执行细节时也能不看代码即可复核。

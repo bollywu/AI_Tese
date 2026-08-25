@@ -102,6 +102,16 @@ class ProjectConfig:
     # ── 安全（hooks 额外命令黑名单，正则） ───────────────────
     extra_blocked_commands: list[str] = field(default_factory=list)
 
+    # ── 单元测试通道（e2e 不可达函数转单测，全部可选） ───────────
+    # 当某函数无法通过被测二进制的正常 E2E 流程触达（gap 根因 N1/N3/N5）时，
+    # gen-agent 可生成 test_driver_*.c 直接调用目标函数，用本段配置的编译器
+    # 以 --coverage 插桩编译出"单测 driver 二进制"并运行，从而覆盖该函数。
+    # gcov 按源码树扫 .gcno/.gcda，天然兼容（无需改采集逻辑）。
+    ut_compiler: str = ""                     # 空 = 跟随 build 体系；否则显式指定（gcc/g++/cc）
+    ut_flags: list[str] = field(default_factory=lambda: ["-O0", "-g", "-Wall"])  # 单测编译附加 flag
+    ut_link_libs: list[str] = field(default_factory=list)   # 额外链接库，如 ["-lm", "-lpthread"]
+    ut_obj_dir: str = ".aicoverage/ut"        # 单测中间产物目录（相对 source_path，.gcno/.gcda 落此）
+
     # ── CodeGraph（MR 增量闭环用，调用链分析/diff 行归因，全部可选）───
     codegraph_enabled: bool = False
     codegraph_index_dir: str = ".codegraph"          # 相对 source_path
@@ -148,6 +158,12 @@ class ProjectConfig:
         return p
 
     @property
+    def ut_obj_path(self) -> Path:
+        """单测中间产物目录（.gcno/.gcda/obj 都落这里）。"""
+        p = Path(self.ut_obj_dir)
+        return p if p.is_absolute() else self.source_path / p
+
+    @property
     def effective_gen_model(self) -> str:
         return self.gen_model or self.model
 
@@ -192,6 +208,11 @@ class ProjectConfig:
         }
         if self.binary_path is not None:
             env["AICOV_BINARY"] = str(self.binary_path)
+        # 单测通道环境（getattr 兜底：兼容 ProjectConfig.__new__ 直构的旧测试实例）
+        env["AICOV_UT_OBJ_DIR"] = str(getattr(self, "ut_obj_path", self.source_path / ".aicoverage" / "ut"))
+        env["AICOV_UT_COMPILER"] = getattr(self, "ut_compiler", "") or "gcc"
+        env["AICOV_UT_FLAGS"] = " ".join(getattr(self, "ut_flags", ["-O0", "-g", "-Wall"]))
+        env["AICOV_UT_LINK_LIBS"] = " ".join(getattr(self, "ut_link_libs", []))
         if run_dir is not None:
             env["AICOV_RUN_DIR"] = str(run_dir)
         if iter_dir is not None:
@@ -228,6 +249,7 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
     guard = raw.get("guard", {})
     codegraph = raw.get("codegraph", {})
     scan = raw.get("scan", {})
+    unit = raw.get("unittest", {})
 
     source_path = Path(src.get("path", ".")).expanduser()
     if not source_path.is_absolute():
@@ -269,6 +291,10 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
         codegraph_index_dir=str(codegraph.get("index_dir", ".codegraph")).strip() or ".codegraph",
         codegraph_entrypoints=[str(x) for x in codegraph.get("entrypoints", ["main"])] or ["main"],
         scan_backend=str(scan.get("backend", "auto")).strip() or "auto",
+        ut_compiler=str(unit.get("compiler", "")).strip(),
+        ut_flags=[str(x) for x in unit.get("flags", ["-O0", "-g", "-Wall"])] or ["-O0", "-g", "-Wall"],
+        ut_link_libs=[str(x) for x in unit.get("link_libs", [])],
+        ut_obj_dir=str(unit.get("obj_dir", ".aicoverage/ut")).strip() or ".aicoverage/ut",
     )
     if cfg.scan_backend not in ("auto", "ocr", "agent", "off"):
         raise ConfigError(f"❌ scan.backend 必须是 auto/ocr/agent/off，当前: {cfg.scan_backend!r}")
