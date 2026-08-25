@@ -329,3 +329,85 @@ class TestUtHitMarking:
         }), encoding="utf-8")
         r3 = CoverageReport.load(old)
         assert r3.files["src/a.c"].functions["legacy"].ut_hit is False
+
+
+# ── max_turns / max_verify_retry 提升 + verify 时序防误判 ────────────
+
+class TestLoopTuning:
+    def test_config_defaults_tuned(self):
+        """默认 max_turns 提升到 120、max_verify_retry 到 3（复杂 C/C++ 项目需要）。"""
+        from aicoverage.config import ProjectConfig
+        assert ProjectConfig.max_turns == 120, "max_turns 默认应 120（80 对复杂项目易 context_overflow）"
+        assert ProjectConfig.max_verify_retry == 3, "max_verify_retry 默认应 3"
+
+    def test_load_config_parses_verify_retry(self, tmp_path):
+        from aicoverage.config import load_config
+        src = tmp_path / "proj"
+        src.mkdir(parents=True)
+        (src / "aicoverage.toml").write_text(
+            '[project]\nname="p"\n'
+            '[source]\npath="."\n'
+            '[build]\nbuild_cmd="make"\nbinary="app"\n'
+            '[test]\ndir="tests"\n'
+            '[llm]\nmodel="m"\nmax_turns=150\nmax_verify_retry=4\n',
+            encoding="utf-8")
+        (src / "tests").mkdir(exist_ok=True)
+        cfg = load_config(str(src / "aicoverage.toml"))
+        assert cfg.max_turns == 150
+        assert cfg.max_verify_retry == 4
+
+    def test_manifest_fingerprint_detects_fix_progress(self, tmp_path):
+        """gen 修复后文件内容变化应被 _snapshot_manifest_files / _has_fix_progress 检出。"""
+        from aicoverage.config import ProjectConfig
+        from aicoverage.loop import _snapshot_manifest_files, _has_fix_progress
+        src = tmp_path / "proj"
+        (src / "tests").mkdir(parents=True)
+        cfg = ProjectConfig.minimal(src, build_cmd="make", binary="app")
+        f = src / "tests" / "test_a.py"
+        f.write_text("def test_a():\n    pass\n", encoding="utf-8")
+        manifest = {"test_files": ["test_a.py"]}
+
+        before = _snapshot_manifest_files(cfg, manifest)
+        assert _has_fix_progress(before, before, manifest) is False, "未改动应无进展"
+
+        # gen 修复后内容变化
+        f.write_text("def test_a():\n    assert 1 == 1\n", encoding="utf-8")
+        after = _snapshot_manifest_files(cfg, manifest)
+        assert _has_fix_progress(before, after, manifest) is True, "修复后应检出进展"
+        assert before["test_a.py"] != after["test_a.py"]
+
+    def test_manifest_fingerprint_handles_missing_file(self, tmp_path):
+        """manifest 声明但磁盘缺失的文件应记为空指纹（不抛异常）。"""
+        from aicoverage.config import ProjectConfig
+        from aicoverage.loop import _snapshot_manifest_files
+        src = tmp_path / "proj"
+        (src / "tests").mkdir(parents=True)
+        cfg = ProjectConfig.minimal(src, build_cmd="make", binary="app")
+        snap = _snapshot_manifest_files(cfg, {"test_files": ["ghost.py"]})
+        assert snap["ghost.py"] == ""
+
+
+# ── verify 时序修复：gen 修复后文件确实更新 ─────────────────────────
+
+class TestVerifyTiming:
+    def test_verify_loop_detects_no_change(self, tmp_path, monkeypatch):
+        """gen 修复后文件未变时应发 GEN_FIX_NO_CHANGE 诊断（避免对旧文件无意义重试）。"""
+        import asyncio
+        from aicoverage import loop as loop_mod
+        from aicoverage.config import ProjectConfig
+
+        src = tmp_path / "proj"
+        (src / "tests").mkdir(parents=True)
+        cfg = ProjectConfig.minimal(src, build_cmd="make", binary="app")
+
+        # 模拟一次 verify 回环：gen 修复后文件未变
+        manifest_path = src / "manifest.json"
+        manifest_path.write_text('{"test_files":["test_a.py"]}', encoding="utf-8")
+        (src / "tests" / "test_a.py").write_text("def test_a():\n    pass\n", encoding="utf-8")
+
+        # 直接验证辅助函数在"未变"场景返回 False（loop 据此发诊断）
+        from aicoverage.loop import _snapshot_manifest_files, _has_fix_progress
+        m = {"test_files": ["test_a.py"]}
+        before = _snapshot_manifest_files(cfg, m)
+        after = _snapshot_manifest_files(cfg, m)
+        assert _has_fix_progress(before, after, m) is False

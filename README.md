@@ -35,7 +35,7 @@
    ┌── 每轮迭代 ──────────────────────────────────────────────┐
    │ [a] coverage-agent  LLM：未覆盖函数根因分类(N1-N6)+补测建议 │
    │ [b] gen-agent       LLM：生成 pytest 用例（原子函数搭积木）  │
-   │ [c] verify-agent    LLM：静态审查，fail→gen 修复回环(≤2)    │
+   │ [c] verify-agent    LLM：静态审查，fail→gen 修复回环(≤max_verify_retry) │
    │ [d] executor        确定性：pytest + junit + gcov 采集      │
    │ [e] quality-agent   LLM（非 PASS 时）：失败归因/flaky/疑似bug│
    │ [f] 状态更新：delta/达标判定/早停（coverage_ceiling 等）      │
@@ -152,7 +152,7 @@ aicov html --from-json path/to/coverage.json --out ./report
 | `[test]` | dir / python / timeout | pytest 目录；解释器（auto=探测）；整体超时（>0） |
 | `[coverage]` | gcov_bin / func_target / cond_target | gcov 可执行文件；达标线 |
 | `[loop]` | max_iter / no_progress_stop | 最大迭代；连续无增长轮数（早停） |
-| `[llm]` | model / gen_model / max_turns | 模型配置 |
+| `[llm]` | model / gen_model / max_turns / max_verify_retry | 模型配置；max_turns=单次 agent 最大工具轮次（复杂项目建议 ≥120）；max_verify_retry=verify 失败修复回环次数（复杂项目建议 3） |
 | `[knowledge]` | kb_dir / badcase_dir / few_shots_dir / prompts_dir | 按项目自备的知识资源；prompts_dir 可整份覆盖内置 prompt |
 | `[guard]` | blocked_commands | 额外命令黑名单（正则，hooks 硬拦截） |
 

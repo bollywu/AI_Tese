@@ -88,7 +88,11 @@ class ProjectConfig:
     # ── LLM / Agent ──────────────────────────────────────────
     model: str = ""                        # 必填：所用 Agent SDK 支持的模型名
     gen_model: str = ""                      # 留空 = 同 model
-    max_turns: int = 80
+    max_turns: int = 120                    # 单次 agent 调用最大工具轮次（复杂项目易触发
+                                            # context_overflow，80 偏小，2026-08-25 调至 120）
+    max_verify_retry: int = 3               # verify 失败修复回环最大次数（2 时复杂项目
+                                            # gen 修不完易假早停 verify_fail_exceeded，
+                                            # 2026-08-25 调至 3）
     permission_mode: str = "bypassPermissions"
 
     # ── 知识资源（全部可选） ─────────────────────────────────
@@ -317,7 +321,8 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
         no_progress_stop=int(loop.get("no_progress_stop", 2)),
         model=str(llm.get("model", "")).strip(),
         gen_model=str(llm.get("gen_model", "")).strip(),
-        max_turns=int(llm.get("max_turns", 80)),
+        max_turns=int(llm.get("max_turns", 120)),
+        max_verify_retry=int(llm.get("max_verify_retry", 3)),
         permission_mode=str(llm.get("permission_mode", "bypassPermissions")).strip(),
         kb_dir=_resolve_dir(path.parent, know.get("kb_dir", "")),
         badcase_dir=_resolve_dir(path.parent, know.get("badcase_dir", "")),

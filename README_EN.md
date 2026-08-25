@@ -36,7 +36,7 @@ An automated **test-coverage closure loop for any C/C++ project**: **requirement
    │ [a] coverage-agent  LLM: uncovered-function root-cause (N1-N6) │
    │                     + gap-filling suggestions                 │
    │ [b] gen-agent       LLM: generate pytest cases (atomic-building) │
-   │ [c] verify-agent    LLM: static review, fail→gen fix loop(≤2)   │
+   │ [c] verify-agent    LLM: static review, fail→gen fix loop(≤max_verify_retry) │
    │ [d] executor         deterministic: pytest + junit + gcov collect│
    │ [e] quality-agent   LLM (when non-PASS): failure attribution/  │
    │                     flaky/suspected bug                         │
@@ -153,7 +153,7 @@ The report follows the classic drill-down form of mainstream coverage tools (ifr
 | `[test]` | dir / python / timeout | pytest dir; interpreter (auto=probe); overall timeout (>0) |
 | `[coverage]` | gcov_bin / func_target / cond_target | gcov executable; threshold lines |
 | `[loop]` | max_iter / no_progress_stop | max iterations; consecutive no-growth rounds (early stop) |
-| `[llm]` | model / gen_model / max_turns | model configuration |
+| `[llm]` | model / gen_model / max_turns / max_verify_retry | model configuration; max_turns=per-agent max tool turns (≥120 for complex projects); max_verify_retry=verify fix-loop rounds (3 recommended for complex projects) |
 | `[knowledge]` | kb_dir / badcase_dir / few_shots_dir / prompts_dir | project-specific knowledge resources; prompts_dir can fully override built-in prompts |
 | `[guard]` | blocked_commands | extra command blacklist (regex, hard-intercepted by hooks) |
 

@@ -108,6 +108,20 @@ def _ctx_pressure_threshold() -> float:
         return 800_000.0
 
 
+# 明确的 5xx / 网关错误状态码——服务器临时故障，永远应重试，覆盖 generic 关键词
+# 误判（如 HTML 错误页里的 "not found" 会误触 non_retryable）。2026-08-25 修复：
+# ModSecurity kb 构建时 504 Gateway Time-out 被误判 non_retryable 导致构建中断。
+_SERVER_5XX_RE = None
+
+
+def _has_server_5xx(summary: str) -> bool:
+    global _SERVER_5XX_RE
+    if _SERVER_5XX_RE is None:
+        import re as _re
+        _SERVER_5XX_RE = _re.compile(r"\b(?:50[0-9]|51[0-9]|52[0-9])\b")
+    return bool(_SERVER_5XX_RE.search(summary))
+
+
 def _classify_facts(result: AgentRunResult) -> FailureClassification:
     summary = (result.summary or "").lower()
     rate_limited = any(kw in summary for kw in _RATE_LIMIT_KEYWORDS)
@@ -116,6 +130,11 @@ def _classify_facts(result: AgentRunResult) -> FailureClassification:
     context_overflow = any(kw in summary for kw in _CONTEXT_OVERFLOW_KEYWORDS)
 
     is_timeout = transient and ("timeout" in summary or "超时" in summary or "挂起" in summary)
+    # 明确的 5xx 网关错误 → 强制 transient（可重试），即使混入 non_retryable 关键词
+    server_5xx = _has_server_5xx(summary)
+    if server_5xx:
+        non_retryable = False
+        transient = True
     # 幻觉判定排除一切可识别异常（2026-08-21 幻觉误标治理结论）
     hallucinated = (result.tool_uses == 0
                     and not is_timeout and not context_overflow
@@ -124,6 +143,8 @@ def _classify_facts(result: AgentRunResult) -> FailureClassification:
     if context_overflow:
         primary = FailureClass.CONTEXT_OVERFLOW
     elif is_timeout:
+        primary = FailureClass.TRANSIENT
+    elif server_5xx:
         primary = FailureClass.TRANSIENT
     elif hallucinated:
         primary = FailureClass.HALLUCINATION

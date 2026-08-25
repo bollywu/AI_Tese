@@ -53,7 +53,8 @@ no_progress_stop = 2
 [llm]
 model = "your-model-name"  # 必填：所用 Agent SDK 支持的模型名
 gen_model = ""         # 留空 = 同 model
-max_turns = 80
+max_turns = 120        # 单次 agent 调用最大工具轮次（复杂 C/C++ 项目 80 易 context_overflow）
+max_verify_retry = 3   # verify 失败修复回环最大次数（复杂项目 gen 修不完 2 次易假早停）
 
 [knowledge]            # 全部可选
 kb_dir = ""            # 项目测试知识库（Markdown）

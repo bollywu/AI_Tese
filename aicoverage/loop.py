@@ -147,6 +147,32 @@ def _prompt_gen_fix(cfg: ProjectConfig, iter_dir: Path, problems: list[dict],
 （只修复列出的问题，不要大改其他用例。）"""
 
 
+def _snapshot_manifest_files(cfg: ProjectConfig, manifest: dict) -> dict[str, str]:
+    """快照 manifest 声明文件的（相对路径 → 内容 sha1），用于比对 gen 修复是否落盘。
+
+    若 verify 时序上读到旧文件（gen 修复晚于 verify 快照），此指纹可揭示
+    "gen 实际改动了文件但 verify 报告基于旧版"的假早停。
+    """
+    import hashlib
+    snap: dict[str, str] = {}
+    for f in manifest.get("test_files", []):
+        p = cfg.test_dir / f
+        try:
+            snap[str(f)] = hashlib.sha1(p.read_bytes()).hexdigest()
+        except OSError:
+            snap[str(f)] = ""
+    return snap
+
+
+def _has_fix_progress(before: dict[str, str], after: dict[str, str],
+                      manifest: dict) -> bool:
+    """判断 gen 修复是否改动到 verify 关心的问题文件（即修复有实质进展）。
+
+    before/after 为 _snapshot_manifest_files 结果。有任一文件内容变化即视为有进展。
+    """
+    return any(before.get(f) != after.get(f) for f in before)
+
+
 def _prompt_verify(run_id: str, iter_n: int, iter_dir: Path,
                    manifest: dict) -> str:
     files = manifest.get("test_files", [])
@@ -216,7 +242,8 @@ async def run_loop(
           f"max_iter={max_iter}{scope_tag}）")
 
     thresholds = {"func_pct": float(func_target), "cond_pct": float(cond_target)}
-    limits = {"max_iter": int(max_iter), "max_verify_retry": 2,
+    limits = {"max_iter": int(max_iter),
+              "max_verify_retry": int(cfg.max_verify_retry),
               "no_progress_iters": cfg.no_progress_stop}
     state = st.init_loop_state(runs_dir, run_id, "manual", thresholds, limits, requirement)
     if target_functions:
@@ -473,10 +500,28 @@ async def run_loop(
             if attempt >= limits["max_verify_retry"]:
                 break
             print(f"      ⚠️ 审查未过（error {len(errors)}），回环修复（第 {attempt + 1} 次）")
+            # 时序防误判：gen 修复前快照 manifest 声明文件的内容指纹，修复后对比。
+            # 若 gen 未实际改动任何文件（verify 报的是旧问题时 gen 修了但没落盘/
+            # 或 verify 时序上读到旧版），避免进入下一轮对"旧文件"的无意义 verify。
+            before = _snapshot_manifest_files(cfg, manifest)
             await _call("gen-agent",
                         _prompt_gen_fix(cfg, iter_dir, problems, manifest_path),
                         iter_dir, iter_n, "gen_fix")
             manifest = _read_json(manifest_path) or manifest
+            after = _snapshot_manifest_files(cfg, manifest)
+            changed = {f for f in before if before[f] != after.get(f)}
+            if not changed:
+                obs.emit_diagnostic(
+                    "GEN_FIX_NO_CHANGE", run_id,
+                    message=f"iter {iter_n} gen 修复后 manifest 文件内容未变化，"
+                            f"verify 可能读到旧版本或 gen 未实际修复",
+                    iter_n=iter_n, stage="gen_fix", runs_dir=runs_dir)
+                print("      ⚠️ gen 修复后文件未变化——verify 可能读到旧版本；"
+                      "已给 verify 完整回环机会（max_verify_retry 提升）")
+            elif _has_fix_progress(before, after, manifest):
+                print(f"      ✅ gen 已修复 {len(changed)} 个文件，进入下一轮 verify 复核")
+            else:
+                print(f"      ℹ️ gen 修复改动 {len(changed)} 个文件（可能与问题清单无关），进入下一轮 verify")
         if not verify_ok:
             obs.emit_diagnostic("VERIFY_FAIL_EXCEEDED", run_id,
                                 message=f"iter {iter_n} verify 修复回环后仍未通过",
