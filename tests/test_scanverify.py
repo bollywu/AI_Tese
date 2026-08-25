@@ -131,17 +131,8 @@ class TestMrLoopGuards:
 
         src = tmp_path / "proj"
         (src / "tests").mkdir(parents=True)
-        cfg = ProjectConfig.__new__(ProjectConfig)
-        cfg.config_path = src / "aicoverage.toml"
-        cfg.name = "proj"; cfg.display_name = "proj"
-        cfg.source_path = src
-        cfg.build_cmd = "make"; cfg.binary = Path("app")
-        cfg.test_dirname = "tests"; cfg.test_timeout = 60
-        cfg.func_target = 100.0; cfg.cond_target = 85.0
-        cfg.max_iter = 2; cfg.no_progress_stop = 2
+        cfg = ProjectConfig.minimal(src, name="proj", build_cmd="make", binary="app")
         cfg.codegraph_enabled = False
-        cfg.codegraph_index_dir = ".codegraph"
-        cfg.codegraph_entrypoints = ["main"]
         # workspace/runs_dir 是 property（由 source_path 派生），无需也无法赋值
 
         summary = asyncio.run(run_mr_loop(cfg, base_ref="HEAD~1", head_ref="HEAD"))
@@ -157,14 +148,7 @@ class TestMrLoopGuards:
 
         src = tmp_path / "proj2"
         (src / "tests").mkdir(parents=True)
-        cfg = ProjectConfig.__new__(ProjectConfig)
-        cfg.config_path = src / "aicoverage.toml"
-        cfg.name = "proj"; cfg.display_name = "proj"
-        cfg.source_path = src
-        cfg.build_cmd = "make"; cfg.binary = Path("app")
-        cfg.test_dirname = "tests"; cfg.test_timeout = 60
-        cfg.func_target = 100.0; cfg.cond_target = 85.0
-        cfg.max_iter = 2; cfg.no_progress_stop = 2
+        cfg = ProjectConfig.minimal(src, name="proj", build_cmd="make", binary="app")
         cfg.codegraph_enabled = True
         cfg.codegraph_index_dir = ".codegraph"
         cfg.codegraph_entrypoints = ["main"]

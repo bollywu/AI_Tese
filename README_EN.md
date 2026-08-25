@@ -174,6 +174,12 @@ your-project/
 
 **Unit-test channel (E2E-unreachable → unit test)**: some functions cannot be reached through the normal E2E flow of the binary under test (gap root causes N1 specific runtime env/multi-process/signal, N3 error path, N5 dead code/platform-specific/no call site). In such cases gen-agent generates a `test_driver_*.c` that calls the target function directly, using the harness's `compile_unit_driver()` (`--coverage` instrumentation) + `run_driver()` to build and run a unit-test binary, so gcov picks up that function. Since gcov scans the source tree for `.gcno/.gcda`, the unit-test channel is fully compatible with the existing collection logic — no changes needed there. Unit-test build settings live in the `[unittest]` section of `aicoverage.toml` (compiler / flags / link_libs / obj_dir).
 
+**Stability hardening**:
+- **Link-failure self-healing**: on `undefined reference` (missing library), `compile_unit_driver` automatically tries common libraries (`-lm`/`-lpthread`/`-lrt`/`-ldl`/`-lz`) one by one; if all fail it hints to fill `[unittest] link_libs`
+- **Driver crash detection**: `run_driver` detects signal-terminated drivers (e.g. SIGSEGV) and clearly distinguishes driver-construction bugs from real defects in the function under test
+- **Coverage preserved on timeout**: even when the whole pytest run is killed by timeout, gcov collection is still attempted — counts from already-executed cases are not lost
+- **Source distinguishability**: gcov collection marks functions covered only by unit-test drivers (`ut_hit`); the HTML report file page shows a `UT` badge, making E2E vs unit-test coverage obvious at a glance
+
 **Dual-layer auditability** (doc-header gate added 2026-08-24):
 1. **Static**: each `test_*` function's docstring must contain a "description" (one sentence on what behavior is verified) + a "test point" (corresponding source location and branch) — a reviewer can understand each case's purpose **from source alone, without running code**. This is a **deterministic gate** (`aicoverage/docstyle.py`, pure AST parsing, zero LLM tokens), auto-checked by `loop.py` in the verify phase and merged into `verify_report.json` (`EC-07`); a missing field is directly judged fail and looped back to gen-agent to fix.
 2. **Runtime**: the three-element execution log (`print_test_point_box()` test-point box / `manual_step()` real observation / assertion expected-vs-observed) ensures a reviewer can re-verify execution details without reading code.

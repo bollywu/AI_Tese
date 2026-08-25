@@ -85,6 +85,10 @@ table.cov tr:hover td { background: #f9fbff; }
 .src .fnrow { background: #fff8c5; }
 .legend { font-size: 11px; color: #57606a; margin: 8px 0 12px; }
 .legend b { color: #1f2328; }
+.ut-badge { background: #ddf4ff; color: #0969da; border: 1px solid #54aeff;
+            border-radius: 8px; font-size: 10px; font-weight: 600;
+            padding: 0 5px; margin-left: 6px; vertical-align: 1px; }
+.ut-badge:hover { background: #b6e3ff; }
 /* 导航树 */
 body.nav { background: #f6f8fa; padding: 12px 10px; font-size: 12px; }
 body.nav ul { list-style: none; margin: 0; padding-left: 14px; }
@@ -365,9 +369,13 @@ def _file_page(node: Node, fc: FileCov, by_rel: dict[str, Node], stamp: str) -> 
         )
         mark = ('<span class="ico fnhit">&#10004;</span>' if f.hit
                 else '<span class="ico fnmiss">&#10008;</span>')
+        # 仅单测 driver 覆盖（E2E 未命中）的函数加 UT 徽标，来源一目了然
+        ut_badge = ('<span class="ut-badge" title="仅由单测 driver 直接调用覆盖，'
+                    'E2E 流程未触达">UT</span>' if f.ut_hit else "")
         rows.append(
             f'<tr><td class="name">{mark}'
             f'<a href="{src_page}#fn_{f.start_line}">{html.escape(f.name)}</a>'
+            f'{ut_badge}'
             f'<span class="dim"> &nbsp;line {f.start_line}'
             f'{f" &nbsp;exec {f.execution_count}" if f.hit else ""}</span></td>'
             f"{_metric_cells(m)}</tr>")
@@ -375,6 +383,7 @@ def _file_page(node: Node, fc: FileCov, by_rel: dict[str, Node], stamp: str) -> 
 
     legend = ('<p class="legend"><b>&#10004;</b> 函数已执行 &nbsp; '
               '<b>&#10008;</b> 函数未执行 &nbsp; '
+              '<b class="ut-badge">UT</b> 仅由单测 driver 直接调用覆盖（E2E 流程未触达）&nbsp; '
               'exec = gcov 记录的函数执行次数 &nbsp; '
               f'点击函数名跳转到 <a href="{src_page}">源码</a> 对应位置</p>')
     body = [stamp, _crumb(node, by_rel), "<hr>", legend, "".join(rows)]

@@ -156,10 +156,15 @@ def run_tests(
         result.tests, result.failures, result.errors, result.skipped = _parse_junit(junit_path)
 
     # 4. 覆盖率采集
-    if collect_coverage and rc != 124:
+    # 超时（rc=124）也尝试采集：进程虽被强杀，但已执行用例的 .gcda 计数会保留
+    # （gcov 运行时计数按行累计到 .gcda），丢了等于浪费整轮执行；gcov 解析对
+    # 不完整/损坏的 .gcda 有容错（_read_gcov_json 返回 None 跳过）。
+    # ut_dir：标记"仅单测 driver 覆盖"的函数（E2E 未命中的），报告可区分来源。
+    if collect_coverage:
         report = gcov_collect(
             cfg.source_path, cfg.gcov_bin,
             include_filter=cfg.include_globs, exclude_filter=cfg.exclude_globs,
+            ut_dir=cfg.ut_obj_path,
         )
         report.save(coverage_path)
         result.coverage_path = coverage_path

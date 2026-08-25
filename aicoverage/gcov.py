@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -39,6 +40,7 @@ class FunctionCov:
     execution_count: int
     blocks: int
     blocks_executed: int
+    ut_hit: bool = False      # True = 该函数仅被单测 driver 覆盖（E2E 未命中）
 
     @property
     def hit(self) -> bool:
@@ -48,7 +50,8 @@ class FunctionCov:
         return {"file": self.file, "name": self.name,
                 "start_line": self.start_line, "end_line": self.end_line,
                 "execution_count": self.execution_count, "hit": self.hit,
-                "blocks": self.blocks, "blocks_executed": self.blocks_executed}
+                "blocks": self.blocks, "blocks_executed": self.blocks_executed,
+                "ut_hit": self.ut_hit}
 
 
 @dataclass
@@ -195,6 +198,7 @@ class CoverageReport:
                     start_line=fd.get("start_line", 0), end_line=fd.get("end_line", 0),
                     execution_count=fd.get("execution_count", 0),
                     blocks=fd.get("blocks", 0), blocks_executed=fd.get("blocks_executed", 0),
+                    ut_hit=bool(fd.get("ut_hit", False)),
                 )
             for bd in fc_data.get("branches", []):
                 fc.branches.append(BranchCov(
@@ -291,6 +295,7 @@ def collect(
     exclude_filter=None,
     out_dir: Path | None = None,
     timeout_per_file: int = 60,
+    ut_dir: Path | None = None,
 ) -> CoverageReport:
     """执行 gcov 并汇总覆盖率。
 
@@ -318,6 +323,10 @@ def collect(
     if not gcno_files:
         return report
 
+    # 单测来源判定：ut_dir（如 .aicoverage/ut/）下的 .gcno 属于单测 driver 产物。
+    # 命中但 E2E（非 ut 目录）未命中的函数 → ut_hit=True（仅被单测覆盖）。
+    ut_root = Path(ut_dir).resolve() if ut_dir else None
+
     work_dir = out_dir or (source_root / ".aicoverage" / "coverage_raw")
     # 每次全新开始（旧实现的部分 glob 清理无法应对新增的子目录结构）
     if work_dir.exists():
@@ -327,7 +336,13 @@ def collect(
 
     from .globutil import glob_matches
 
-    for i, gcno in enumerate(gcno_files):
+    # 每个子目录 gcno 的 ut 标记：子目录序号 → 是否单测来源。
+    # gcov 执行用线程池并行（每个 .gcno 是独立子进程、写独立子目录，互不干扰），
+    # 大项目 .gcno 众多时显著提速（P3 性能优化）。
+    gcno_is_ut: dict[int, bool] = {}
+
+    def _run_gcov(i_gcno: tuple[int, Path]) -> bool:
+        i, gcno = i_gcno
         sub = work_dir / str(i)
         sub.mkdir(parents=True, exist_ok=True)
         try:
@@ -336,18 +351,36 @@ def collect(
                 cwd=sub, capture_output=True, timeout=timeout_per_file,
             )
         except (subprocess.TimeoutExpired, OSError):
-            continue
+            return False
+        try:
+            return ut_root is not None and gcno.resolve().is_relative_to(ut_root)
+        except ValueError:
+            return False
+
+    import concurrent.futures as _cf
+    workers = min(8, max(1, (os.cpu_count() or 4)))
+    with _cf.ThreadPoolExecutor(max_workers=workers) as pool:
+        results = list(pool.map(_run_gcov, list(enumerate(gcno_files))))
+    for i, is_ut in enumerate(results):
+        gcno_is_ut[i] = is_ut
 
     # 顺序无关：不再 sorted()，处理顺序完全不影响合并结果
     json_paths = list(work_dir.rglob("*.gcov.json")) + list(work_dir.rglob("*.gcov.json.gz"))
 
-    # 按 rel 路径收集全部原始 file_entry（同一 rel 可能有多份，来自双重编译）
-    raw_by_rel: dict[str, list[dict]] = {}
+    # 按 rel 路径收集全部原始 file_entry（同一 rel 可能有多份，来自双重编译），
+    # 附带该记录是否来自单测产物（用于区分 E2E/单测覆盖来源）
+    raw_by_rel: dict[str, list[tuple[dict, bool]]] = {}
     for jp in json_paths:
         data = _read_gcov_json(jp)
         if not isinstance(data, dict) or "files" not in data:
             continue
         compile_cwd = data.get("current_working_directory", "")
+        # jp 位于 work_dir/<序号>/ 下，反查该 gcno 的 ut 标记
+        try:
+            idx = int(jp.parent.name)
+        except ValueError:
+            idx = -1
+        is_ut = gcno_is_ut.get(idx, False)
         for file_entry in data["files"]:
             rel = _normalize_file(file_entry.get("file", ""), compile_cwd, source_root)
             if rel is None:
@@ -356,14 +389,16 @@ def collect(
                 continue
             if exclude_filter and glob_matches(rel, exclude_filter):
                 continue
-            raw_by_rel.setdefault(rel, []).append(file_entry)
+            raw_by_rel.setdefault(rel, []).append((file_entry, is_ut))
 
     for rel, entries in raw_by_rel.items():
         fc = FileCov(file=rel)
 
-        # 函数：同名函数在多份重复编译中取 execution_count 更大的一份
+        # 函数：同名函数在多份重复编译中取 execution_count 更大的一份。
+        # 同时维护"仅 E2E（非单测来源）"的最优统计，用于判定 ut_hit。
         func_best: dict[str, dict] = {}
-        for entry in entries:
+        func_best_e2e: dict[str, dict] = {}
+        for entry, is_ut in entries:
             for fn in entry.get("functions", []):
                 name = fn.get("demangled_name") or fn.get("name") or ""
                 if not name:
@@ -371,7 +406,14 @@ def collect(
                 prev = func_best.get(name)
                 if prev is None or int(fn.get("execution_count", 0)) > int(prev.get("execution_count", 0)):
                     func_best[name] = fn
+                if not is_ut:
+                    prev_e = func_best_e2e.get(name)
+                    if prev_e is None or int(fn.get("execution_count", 0)) > int(prev_e.get("execution_count", 0)):
+                        func_best_e2e[name] = fn
         for name, fn in func_best.items():
+            e2e_fn = func_best_e2e.get(name)
+            e2e_hit = bool(e2e_fn and int(e2e_fn.get("execution_count", 0)) > 0)
+            hit = int(fn.get("execution_count", 0)) > 0
             fc.functions[name] = FunctionCov(
                 file=rel, name=name,
                 start_line=int(fn.get("start_line", 0)),
@@ -379,6 +421,7 @@ def collect(
                 execution_count=int(fn.get("execution_count", 0)),
                 blocks=int(fn.get("blocks", 0)),
                 blocks_executed=int(fn.get("blocks_executed", 0)),
+                ut_hit=bool(hit and not e2e_hit),
             )
 
         # 行 + 分支：按行号取「计数更大」的一份（该行的分支列表整体随之带走，
@@ -386,7 +429,7 @@ def collect(
         line_best_count: dict[int, int] = {}
         line_best_branches: dict[int, list[dict]] = {}
         line_best_fname: dict[int, str] = {}
-        for entry in entries:
+        for entry, _is_ut in entries:
             for ln in entry.get("lines", []):
                 line_no = int(ln.get("line_number", 0))
                 count = int(ln.get("count", 0))

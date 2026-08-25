@@ -198,6 +198,20 @@ def run_binary(args, *, stdin: str | None = None, timeout: int = 30,
 #       调用目标函数，用 --coverage 插桩编译出单测二进制并运行，让 gcov 采集
 #       到该函数。因为 gcov 按源码树扫 .gcno/.gcda，这套通道与现有采集完全兼容。
 
+# 常见链接库（undefined reference 时自动逐个尝试补齐，省去人工配置 link_libs）
+_COMMON_LINK_LIBS = ("-lm", "-lpthread", "-lrt", "-ldl", "-lz")
+
+
+def _run_cc(cmd: list, *, timeout: int, cwd: str) -> tuple[int, str]:
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                              cwd=cwd)
+        log = (proc.stdout or "") + ("\n[stderr]\n" + proc.stderr if proc.stderr else "")
+        return proc.returncode, log
+    except subprocess.TimeoutExpired:
+        return 124, f"TIMEOUT after {timeout}s"
+
+
 def compile_unit_driver(driver_c: Path | str, sources: list[Path | str],
                         out_name: str = "ut_main",
                         include_dirs: list[Path | str] | None = None,
@@ -231,19 +245,33 @@ def compile_unit_driver(driver_c: Path | str, sources: list[Path | str],
         p = Path(d)
         inc.append(str(p if p.is_absolute() else SRC_ROOT / p))
 
-    # 先编译被测源 → 目标文件（-c 生成 .o + .gcno），再链接 driver 一起出二进制
-    cmd = [cc, "--coverage", *flags]
+    base_cmd = [cc, "--coverage", *flags]
     if inc:
-        cmd += ["-I" + d for d in inc]
-    cmd += src_list + [str(driver_p), "-o", str(out_bin), *link_libs]
+        base_cmd += ["-I" + d for d in inc]
+    base_cmd += src_list + [str(driver_p), "-o", str(out_bin)]
+
     start = time.time()
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                              cwd=str(SRC_ROOT))
-        rc = proc.returncode
-        log = (proc.stdout or "") + ("\n[stderr]\n" + proc.stderr if proc.stderr else "")
-    except subprocess.TimeoutExpired:
-        rc, log = 124, f"TIMEOUT after {timeout}s"
+    cmd = [*base_cmd, *link_libs]
+    rc, log = _run_cc(cmd, timeout=timeout, cwd=str(SRC_ROOT))
+
+    # 链接失败自愈：stderr 出现 undefined reference（缺库）时，自动逐个尝试
+    # 常见库补齐（-lm/-lpthread/-lrt/-ldl/-lz），成功即用；全部失败则给出
+    # 明确提示，引导用户在 aicoverage.toml [unittest] link_libs 里补全。
+    if rc != 0 and "undefined reference" in log:
+        for lib in _COMMON_LINK_LIBS:
+            if lib in link_libs:
+                continue
+            try_cmd = [*base_cmd, *link_libs, lib]
+            try_rc, try_log = _run_cc(try_cmd, timeout=timeout, cwd=str(SRC_ROOT))
+            if try_rc == 0:
+                cmd, rc, log = try_cmd, 0, try_log
+                break
+    if rc != 0 and "undefined reference" in log:
+        log += ("\n[提示] 链接失败通常是目标函数依赖了额外库。请在 aicoverage.toml "
+                "的 [unittest] link_libs 中补齐，例如数学库加 [\"-lm\"]、线程库加 "
+                "[\"-lpthread\"]（本函数已自动尝试 -lm/-lpthread/-lrt/-ldl/-lz，"
+                "若仍未解决，可能是自定义/第三方静态库）。")
+
     if rc == 0 and not out_bin.exists():
         rc, log = 127, log + f"\n编译成功但产物不存在: {out_bin}"
     manual_step("compile_unit_driver",
@@ -274,18 +302,45 @@ def run_driver(out_name: str = "ut_main", args: list | None = None, *,
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
                               env=env, cwd=str(SRC_ROOT))
-        return ProcResult(cmd=cmd, rc=proc.returncode, stdout=proc.stdout,
-                          stderr=proc.stderr,
+        rc = proc.returncode
+        stderr = proc.stderr or ""
+        # 崩溃检测：rc 为负值 = 被信号终止（如 -11=SIGSEGV）。driver 直接调用
+        # 被测函数可能因野指针/越界崩溃，给出明确提示（是 driver 构造问题还是
+        # 被测函数真实缺陷，需结合 stderr 判断）。
+        if rc < 0:
+            sig = -rc
+            sig_name = _SIGNAL_NAMES.get(sig, f"signal {sig}")
+            stderr += (f"\n[崩溃] 单测 driver 被信号 {sig_name}({sig}) 终止。"
+                       f"常见原因：driver 参数构造越界/野指针（先查 driver 的输入构造），"
+                       f"或被测函数在特定输入下真实崩溃（可作为疑似产品缺陷上报）。")
+        return ProcResult(cmd=cmd, rc=rc, stdout=proc.stdout,
+                          stderr=stderr,
                           duration_ms=int((time.time() - start) * 1000))
     except subprocess.TimeoutExpired:
         return ProcResult(cmd=cmd, rc=124, stdout="", stderr=f"TIMEOUT after {timeout}s",
                           duration_ms=int((time.time() - start) * 1000))
 
 
+_SIGNAL_NAMES = {
+    1: "SIGHUP", 2: "SIGINT", 3: "SIGQUIT", 4: "SIGILL", 6: "SIGABRT",
+    8: "SIGFPE", 9: "SIGKILL", 11: "SIGSEGV", 13: "SIGPIPE", 14: "SIGALRM",
+    15: "SIGTERM", 24: "SIGXCPU", 25: "SIGXFSZ",
+}
+
+
 def assert_ut_compiled(res: ProcResult) -> None:
     """断言单测 driver 编译成功（rc=0）。"""
     print(f"  assert_ut_compiled: rc={res.rc}")
     assert res.rc == 0, f"单测编译失败，编译输出:\n{res.stdout}"
+
+
+def assert_driver_ok(res: ProcResult) -> None:
+    """断言单测 driver 正常运行（rc=0 且未被信号终止）。崩溃（rc<0）时给出
+    明确区分提示，比裸断言退出码更可读。"""
+    print(f"  assert_driver_ok: rc={res.rc}")
+    assert res.rc == 0, (
+        f"单测 driver 未正常返回 0（rc={res.rc}）。stderr:\n{res.stderr}"
+        if res.rc != 0 else "")
 
 
 # ── 本地测试服务（网络类用例一律自起回环服务，禁止连外网） ────

@@ -124,6 +124,34 @@ class ProjectConfig:
                                  # agent: 强制自研 scan-agent
                                  # off: 跳过扫描轨
 
+    # ── 运行期缓存（不入配置） ────────────────────────────────
+    _source_files_cache: list | None = field(default=None, repr=False, compare=False)
+
+    # ── 工厂方法 ─────────────────────────────────────────────
+    @classmethod
+    def minimal(cls, source_path, *, name=None, build_cmd="", binary=None,
+                test_dirname="tests", language="c") -> "ProjectConfig":
+        """构造一个最小可用配置（确定性阶段的默认值自动填全）。
+
+        用于测试/工具脚本里需要"只指定关键字段"的场景，避免手写
+        ProjectConfig.__new__ + 逐个赋值（缺字段会在运行时崩，见 to_env 依赖）。
+        所有可选字段走 dataclass 默认值，保证字段完整。
+        """
+        src = Path(source_path).expanduser().resolve()
+        return cls(
+            config_path=src / "aicoverage.toml",
+            name=name or src.name,
+            display_name=name or src.name,
+            language=language,
+            source_path=src,
+            build_cmd=build_cmd,
+            binary=Path(binary) if binary else None,
+            test_dirname=test_dirname,
+            test_timeout=600,
+            func_target=100.0, cond_target=85.0,
+            max_iter=6, no_progress_stop=2,
+        )
+
     # ── 派生路径 ─────────────────────────────────────────────
     @property
     def test_dir(self) -> Path:
@@ -181,21 +209,30 @@ class ProjectConfig:
         return errors
 
     def source_files(self) -> list[Path]:
-        """按 include/exclude glob 匹配的源文件（绝对路径；`**` 为 gitignore 语义）。"""
+        """按 include/exclude glob 匹配的源文件（绝对路径；`**` 为 gitignore 语义）。
+
+        结果做实例级缓存（同一闭环内多次调用避免重复全量 rglob 扫描大项目）。
+        """
         from .globutil import glob_matches
 
+        if self._source_files_cache is not None:
+            return list(self._source_files_cache)
         results: list[Path] = []
-        if not self.source_path.is_dir():
-            return results
-        all_files = [
-            p for p in self.source_path.rglob("*")
-            if p.is_file() and p.suffix in (".c", ".cc", ".cpp", ".cxx")
-        ]
-        for p in sorted(all_files):
-            rel = p.relative_to(self.source_path).as_posix()
-            if glob_matches(rel, self.include_globs) and not glob_matches(rel, self.exclude_globs):
-                results.append(p)
-        return results
+        if self.source_path.is_dir():
+            all_files = [
+                p for p in self.source_path.rglob("*")
+                if p.is_file() and p.suffix in (".c", ".cc", ".cpp", ".cxx")
+            ]
+            for p in sorted(all_files):
+                rel = p.relative_to(self.source_path).as_posix()
+                if glob_matches(rel, self.include_globs) and not glob_matches(rel, self.exclude_globs):
+                    results.append(p)
+        self._source_files_cache = list(results)
+        return list(results)
+
+    def invalidate_source_files(self) -> None:
+        """清空 source_files 缓存（若项目源码在运行期发生变化）。"""
+        self._source_files_cache = None
 
     def to_env(self, run_dir: Path | None = None, iter_dir: Path | None = None) -> dict[str, str]:
         """构造注入 agent 运行环境的关键变量（AICOV_* 系列）。"""
