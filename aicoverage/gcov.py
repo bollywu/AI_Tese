@@ -1,11 +1,11 @@
-"""gcov 覆盖率后端：解析 `gcov -i -b` 的 JSON 中间格式（.gcov.json / .gcov.json.gz）。
+"""gcov coverage backend: parses `gcov -i -b` intermediate JSON (.gcov.json / .gcov.json.gz).
 
-gcc ≥ 9 支持 `-i`（intermediate JSON），gcc 12 默认 gzip 压缩输出。JSON 结构：
+gcc >= 9 supports `-i` (intermediate JSON); gcc 12 defaults to gzip-compressed output. JSON structure:
 
     {"gcc_version": "...", "format_version": "1",
      "files": [{
          "file": "src/wrk.c",
-         "current_working_directory": "/build/cwd",     # 编译时 cwd（相对路径还原用）
+         "current_working_directory": "/build/cwd",     # compile-time cwd (for relative-path reconstruction)
          "functions": [{"name", "demangled_name", "start_line", "end_line",
                         "execution_count", "blocks", "blocks_executed", ...}],
          "lines": [{"line_number", "count", "unexecuted_block",
@@ -13,10 +13,10 @@ gcc ≥ 9 支持 `-i`（intermediate JSON），gcc 12 默认 gzip 压缩输出�
                     "branches": [{"count", "fallthrough", "throw"}, ...]}]
      }]}
 
-指标口径（对齐经典覆盖率工具的口径）：
-- 函数覆盖率 = execution_count > 0 的函数 / 全部函数
-- 分支覆盖率 = count > 0 的分支（taken at least once）/ 全部分支
-- 行覆盖率 = count > 0 的行 / 全部行（辅助指标）
+Metric semantics (aligned with classic coverage tools):
+- function coverage = functions with execution_count > 0 / all functions
+- branch coverage = branches with count > 0 (taken at least once) / all branches
+- line coverage = lines with count > 0 / all lines (auxiliary metric)
 """
 from __future__ import annotations
 
@@ -33,14 +33,14 @@ from pathlib import Path
 
 @dataclass
 class FunctionCov:
-    file: str                 # 相对源码根（规范化后）
-    name: str                 # 函数名（demangled 优先）
+    file: str                 # relative to source root (normalized)
+    name: str                 # function name (demangled preferred)
     start_line: int
     end_line: int
     execution_count: int
     blocks: int
     blocks_executed: int
-    ut_hit: bool = False      # True = 该函数仅被单测 driver 覆盖（E2E 未命中）
+    ut_hit: bool = False      # True = covered only by unit-test driver (E2E-missed)
 
     @property
     def hit(self) -> bool:
@@ -75,17 +75,17 @@ class FileCov:
     branches: list[BranchCov] = field(default_factory=list)
     lines_total: int = 0
     lines_hit: int = 0
-    # 行号 → 执行次数（仅 gcov 认定的可执行行；HTML 报告逐行着色用）
+    # line no -> execution count (only gcov-identified executable lines; used for HTML line coloring)
     line_counts: dict[int, int] = field(default_factory=dict)
 
 
 @dataclass
 class CoverageReport:
-    """一次覆盖率采集的完整快照（可序列化为 coverage.json）。"""
+    """A complete snapshot of one coverage collection (serializable to coverage.json)."""
     created_at: str = ""
     files: dict[str, FileCov] = field(default_factory=dict)   # rel file -> FileCov
 
-    # ── 聚合指标 ──
+    # ── Aggregate metrics ──
     @property
     def functions(self) -> list[FunctionCov]:
         return [f for fc in self.files.values() for f in fc.functions.values()]
@@ -127,14 +127,14 @@ class CoverageReport:
         return round(self.line_hit * 100.0 / self.line_total, 2) if self.line_total else 0.0
 
     def uncovered_functions(self) -> list[FunctionCov]:
-        """未覆盖函数（按文件排序、行号排序，执行次数为 0）。"""
+        """Uncovered functions (sorted by file, then line; execution count 0)."""
         return sorted(
             (f for f in self.functions if not f.hit),
             key=lambda f: (f.file, f.start_line),
         )
 
     def delta(self, previous: "CoverageReport | None") -> dict:
-        """相对上一轮的增量（pp = 百分点）。"""
+        """Increment relative to the previous round (pp = percentage points)."""
         if previous is None:
             return {"func_pp": self.func_pct, "cond_pp": self.cond_pct,
                     "newly_hit": [f.to_dict() for f in self.functions if f.hit]}
@@ -147,7 +147,7 @@ class CoverageReport:
             "newly_hit": newly,
         }
 
-    # ── 序列化 ──
+    # ── Serialization ──
     def to_dict(self) -> dict:
         return {
             "created_at": self.created_at or datetime.now().isoformat(timespec="seconds"),
@@ -173,7 +173,7 @@ class CoverageReport:
                     "branch_hit": sum(1 for b in fc.branches if b.hit),
                     "lines_total": fc.lines_total,
                     "lines_hit": fc.lines_hit,
-                    # 行号→计数（HTML 报告逐行着色用；key 转字符串以符合 JSON 规范）
+                    # line no -> count (for HTML line coloring; keys as strings per JSON spec)
                     "line_counts": {str(k): v for k, v in sorted(fc.line_counts.items())},
                 }
                 for rel, fc in sorted(self.files.items())
@@ -187,7 +187,7 @@ class CoverageReport:
 
     @classmethod
     def load(cls, path: Path) -> "CoverageReport":
-        """从 coverage.json 还原（含 branches/lines，保证跨轮 delta 与阈值判定正确）。"""
+        """Restore from coverage.json (incl. branches/lines so cross-round delta and threshold checks stay correct)."""
         data = json.loads(path.read_text(encoding="utf-8"))
         report = cls(created_at=data.get("created_at", ""))
         for rel, fc_data in data.get("files", {}).items():
@@ -215,7 +215,7 @@ class CoverageReport:
         return report
 
     def summary_text(self) -> str:
-        """人类可读摘要（终端/报告通用）。"""
+        """Human-readable summary (shared by terminal/report)."""
         lines = [
             f"函数覆盖: {self.func_hit}/{self.func_total} = {self.func_pct:.2f}%",
             f"分支覆盖: {self.branch_hit}/{self.branch_total} = {self.cond_pct:.2f}%",
@@ -229,16 +229,16 @@ class CoverageReport:
         return "\n".join(lines)
 
 
-# ── 采集 ────────────────────────────────────────────────────────────
+# ── Collection ─────────────────────────────────────────────────────────
 
 def find_gcno_files(source_root: Path, exclude_dir: Path | None = None) -> list[Path]:
-    """源码树下的全部 .gcno（插桩编译单元标记文件）。"""
+    """All .gcno files under the source tree (instrumented compilation-unit markers)."""
     results: list[Path] = []
     for p in sorted(source_root.rglob("*.gcno")):
         if exclude_dir is not None:
             try:
                 p.resolve().relative_to(exclude_dir.resolve())
-                continue    # 测试目录内的产物跳过
+                continue    # skip artifacts under the test dir
             except ValueError:
                 pass
         results.append(p)
@@ -246,7 +246,7 @@ def find_gcno_files(source_root: Path, exclude_dir: Path | None = None) -> list[
 
 
 def clean_gcda(source_root: Path, exclude_dir: Path | None = None) -> int:
-    """清除全部 .gcda（运行时计数文件），返回删除数量。"""
+    """Remove all .gcda (runtime counter files); returns the number removed."""
     n = 0
     for p in source_root.rglob("*.gcda"):
         if exclude_dir is not None:
@@ -274,7 +274,7 @@ def _read_gcov_json(path: Path) -> dict | None:
 
 
 def _normalize_file(file_field: str, compile_cwd: str, source_root: Path) -> str | None:
-    """gcov JSON 里的 file 字段还原为相对 source_root 的规范化路径。"""
+    """Reconstruct the gcov JSON 'file' field into a normalized path relative to source_root."""
     if not file_field:
         return None
     p = Path(file_field)
@@ -297,38 +297,46 @@ def collect(
     timeout_per_file: int = 60,
     ut_dir: Path | None = None,
 ) -> CoverageReport:
-    """执行 gcov 并汇总覆盖率。
+    """Run gcov and aggregate coverage.
 
-    步骤：
-    1. 找到全部 .gcno（无 .gcda 时 gcov 仍会输出全 0 计数——即"函数清单基线"）
-    2. 逐个 `gcov -i -b <gcno>`，**每个 gcno 用独立子目录**输出 .gcov.json[.gz]
-       （2026-08-24 修复事故①：libtool 项目常见"静态 + PIC 共享库"双重编译，
-       同一源文件产生两份同 basename 的 .gcno，旧实现把所有输出扁平堆到同一
-       目录，同名文件互相覆盖。独立子目录消除了文件名碰撞。）
-    3. 按 (file) 聚合**全部**原始记录（同一 rel 路径可能有多份，来自双重编译），
-       再按 (file, line/function) 逐项取「计数更大」的一份合并（详见下方合并逻辑）。
-       （2026-08-24 修复事故②——ModSecurity 真实闭环 iter6 中被 gen-agent
-       自行用 gcov 实测发现：子目录用未补零整数字符串命名（"0","1",...,"122"），
-       旧实现按 `sorted(路径字符串)` 决定处理顺序、"先到先得"（seen_files）；
-       但字符串序不是数值序（`"122" < "56"`），当"无 .gcda 的静态编译"子目录
-       字符串序小于"有 .gcda 的真实份"时，零数据反而先写入并占位，真实覆盖
-       被读成 0%——iter6 全部 25 个目标函数命中此 bug，新用例的真实覆盖贡献
-       被完全吞掉，导致覆盖率与 iter5 完全相同、看似"未推进"。
-       现在的合并策略不依赖任何处理顺序：对每个 (file, line) 取全部重复编译
-       记录里 **count 最大**的一份（真实执行数据的 count 天然 ≥ 0 数据，任何
-       顺序下都会胜出），从根本上消除排序依赖。）
+    Steps:
+    1. Find all .gcno (without .gcda gcov still outputs all-zero counts -- i.e. the
+       "function-inventory baseline")
+    2. For each `gcov -i -b <gcno>`, write .gcov.json[.gz] into its **own subdir**
+       (2026-08-24 incident 1 fix: libtool projects commonly double-compile
+       "static + PIC shared lib", so one source file yields two same-basename .gcno;
+       the old implementation flattened all outputs into one dir and same-named files
+       overwrote each other. Per-gcno subdirs eliminate the filename collision.)
+    3. Aggregate **all** raw records by (file) (one rel path may have several copies
+       from double compilation), then for each (file, line/function) take the copy
+       with the **larger count** (see merge logic below).
+       (2026-08-24 incident 2 fix -- discovered by gen-agent itself running gcov
+       during the real ModSecurity loop iter6: subdirs were named with unpadded
+       integer strings ("0","1",...,"122"); the old implementation decided processing
+       order via `sorted(path-string)` and "first-wins" (seen_files); but string order
+       is not numeric order (`"122" < "56"`). When the "no-.gcda static compile"
+       subdir sorts before the "real copy with .gcda", the zero data is written first
+       and occupies the slot, so real coverage is read as 0% -- all 25 target
+       functions in iter6 hit this bug, real coverage contributions from new cases
+       were fully swallowed, making coverage identical to iter5 and appearing
+       "not progressing".
+       The current merge strategy depends on no ordering: for each (file, line) take
+       the record with the **largest count** across all duplicate compilations (real
+       execution data's count is naturally >= 0 data, so it wins under any order),
+       eliminating the ordering dependency fundamentally.)
     """
     report = CoverageReport(created_at=datetime.now().isoformat(timespec="seconds"))
     gcno_files = find_gcno_files(source_root)
     if not gcno_files:
         return report
 
-    # 单测来源判定：ut_dir（如 .aicoverage/ut/）下的 .gcno 属于单测 driver 产物。
-    # 命中但 E2E（非 ut 目录）未命中的函数 → ut_hit=True（仅被单测覆盖）。
+    # Unit-test source detection: .gcno under ut_dir (e.g. .aicoverage/ut/) belongs to
+    # unit-test driver artifacts. Functions hit but E2E-missed (outside ut dir)
+    # -> ut_hit=True (covered only by unit test).
     ut_root = Path(ut_dir).resolve() if ut_dir else None
 
     work_dir = out_dir or (source_root / ".aicoverage" / "coverage_raw")
-    # 每次全新开始（旧实现的部分 glob 清理无法应对新增的子目录结构）
+    # Always start fresh (the old partial-glob cleanup can't handle the new subdir structure)
     if work_dir.exists():
         import shutil as _shutil
         _shutil.rmtree(work_dir, ignore_errors=True)
@@ -336,9 +344,10 @@ def collect(
 
     from .globutil import glob_matches
 
-    # 每个子目录 gcno 的 ut 标记：子目录序号 → 是否单测来源。
-    # gcov 执行用线程池并行（每个 .gcno 是独立子进程、写独立子目录，互不干扰），
-    # 大项目 .gcno 众多时显著提速（P3 性能优化）。
+    # ut flag per subdir gcno: subdir index -> is unit-test source.
+    # gcov runs in parallel via a thread pool (each .gcno is an independent subprocess
+    # writing to its own subdir, no interference), significantly speeding up projects
+    # with many .gcno files (P3 perf optimization).
     gcno_is_ut: dict[int, bool] = {}
 
     def _run_gcov(i_gcno: tuple[int, Path]) -> bool:
@@ -364,18 +373,19 @@ def collect(
     for i, is_ut in enumerate(results):
         gcno_is_ut[i] = is_ut
 
-    # 顺序无关：不再 sorted()，处理顺序完全不影响合并结果
+    # Order-independent: no sorted(); processing order doesn't affect the merge
     json_paths = list(work_dir.rglob("*.gcov.json")) + list(work_dir.rglob("*.gcov.json.gz"))
 
-    # 按 rel 路径收集全部原始 file_entry（同一 rel 可能有多份，来自双重编译），
-    # 附带该记录是否来自单测产物（用于区分 E2E/单测覆盖来源）
+    # Collect all raw file_entries by rel path (one rel may have several copies from
+    # double compilation), tagging each record with whether it came from unit-test
+    # artifacts (to distinguish E2E vs unit-test coverage sources).
     raw_by_rel: dict[str, list[tuple[dict, bool]]] = {}
     for jp in json_paths:
         data = _read_gcov_json(jp)
         if not isinstance(data, dict) or "files" not in data:
             continue
         compile_cwd = data.get("current_working_directory", "")
-        # jp 位于 work_dir/<序号>/ 下，反查该 gcno 的 ut 标记
+        # jp lives under work_dir/<index>/, look up that gcno's ut flag
         try:
             idx = int(jp.parent.name)
         except ValueError:
@@ -394,8 +404,9 @@ def collect(
     for rel, entries in raw_by_rel.items():
         fc = FileCov(file=rel)
 
-        # 函数：同名函数在多份重复编译中取 execution_count 更大的一份。
-        # 同时维护"仅 E2E（非单测来源）"的最优统计，用于判定 ut_hit。
+        # Functions: for same-named functions across duplicate compilations, take the
+        # one with the larger execution_count. Also keep an "E2E-only (non-unit-test)"
+        # best stat to determine ut_hit.
         func_best: dict[str, dict] = {}
         func_best_e2e: dict[str, dict] = {}
         for entry, is_ut in entries:
@@ -424,8 +435,9 @@ def collect(
                 ut_hit=bool(hit and not e2e_hit),
             )
 
-        # 行 + 分支：按行号取「计数更大」的一份（该行的分支列表整体随之带走，
-        # 保持同一来源内 T/F 顺序一致，避免跨份错位配对）
+        # Lines + branches: for each line take the copy with the larger count (the line's
+        # branch list travels with it as a whole, keeping T/F order consistent within one
+        # source and avoiding cross-copy misalignment)
         line_best_count: dict[int, int] = {}
         line_best_branches: dict[int, list[dict]] = {}
         line_best_fname: dict[int, str] = {}

@@ -1,21 +1,25 @@
-"""MR 增量闭环主编排（改造计划文档 §2 总体架构）。
+"""MR incremental-loop orchestrator (design doc §2 overall architecture).
 
-双轨流水线（输入全部来自本地 git diff，**不访问任何代码托管/评审平台**，
-适用于 GitHub / GitLab / 任意私有仓库的本地 clone——完全脱敏）：
+A dual-track pipeline (all input comes from the local git diff; **no access to any code
+hosting/review platform**, works for GitHub / GitLab / any private-repo local clone -- fully
+sanitized):
 
-    [M0] diff 提取（diffextract：git diff -U0 + CodeGraph 行区间归因）
-    [M1] 调用链分批（callgraph.split_batches，chain 策略优先）
-    [M2] 覆盖轨：逐批复用 run_loop(target_functions=batch)，
-        分母收窄到本批变更函数，追求增量 func/cond 达标
-    [M3] 扫描轨：scanverify.run_scan_track（scan-agent 聚焦扫描 →
-        gen 复现用例（正向断言）→ verify → execute → 四态裁决）
-    [M4] 汇总 MR 最终报告（mr_final_report.md）
+    [M0] diff extraction (diffextract: git diff -U0 + CodeGraph line-range attribution)
+    [M1] call-chain batching (callgraph.split_batches, chain strategy preferred)
+    [M2] coverage track: per-batch reuse of run_loop(target_functions=batch),
+         with the denominator narrowed to this batch's changed functions, pursuing
+         incremental func/cond threshold
+    [M3] scan track: scanverify.run_scan_track (scan-agent focused scan ->
+         gen repro cases (positive assertions) -> verify -> execute -> four-state adjudication)
+    [M4] aggregate the MR final report (mr_final_report.md)
 
-通用化设计要点：
-- 零平台依赖：diff 只来自本地 git ref（GitHub/GitLab/私有仓库 clone 后一视同仁）
-- 覆盖轨复用 AIcoverage 自己的 run_loop，
-  通过 target_functions/skip_build 参数注入，不复制状态机
-- 每批独立 run_id（LOOP_ 前缀），MR 主目录（MR_ 前缀）只存汇总产物
+Generalization design points:
+- zero platform dependency: the diff only comes from a local git ref (GitHub/GitLab/private
+  repos are treated equally once cloned)
+- the coverage track reuses AIcoverage's own run_loop via the target_functions/skip_build
+  params; it does not copy the state machine
+- each batch has its own run_id (LOOP_ prefix); the MR master dir (MR_ prefix) only stores
+  the aggregate artifacts
 """
 from __future__ import annotations
 
@@ -50,13 +54,14 @@ async def run_mr_loop(
     skip_coverage: bool = False,
     quiet: bool = False,
 ) -> dict:
-    """MR 增量闭环主入口。
+    """MR incremental-loop main entry.
 
     Args:
-        base_ref/head_ref: 本地 git ref（commit/branch/tag）。head_ref 的代码
-            必须已是当前工作区内容（本闭环不 checkout——插桩构建的是工作区）。
-        split_by: file | chain | size；None = 自动（CodeGraph 可用时 chain，否则 file）
-        skip_scan / skip_coverage: 跳过对应轨道（调试用）
+        base_ref/head_ref: local git refs (commit/branch/tag). head_ref's code must already
+            be the current workspace content (this loop does not checkout -- it instruments
+            the workspace).
+        split_by: file | chain | size; None = auto (chain when CodeGraph is available, else file)
+        skip_scan / skip_coverage: skip the corresponding track (for debugging)
     """
     func_target = func_target if func_target is not None else cfg.func_target
     cond_target = cond_target if cond_target is not None else cfg.cond_target
@@ -77,7 +82,7 @@ async def run_mr_loop(
         "coverage_batches": [], "scan": None,
     }
 
-    # ── [M0] diff 提取 ────────────────────────────────────────
+    # ── [M0] diff extraction ───────────────────────────────────
     print("▶ [M0] diff 提取（CodeGraph 行区间归因）")
     if cfg.codegraph_enabled:
         if not callgraph.is_indexed(cfg.source_path, cfg.codegraph_index_dir):
@@ -111,7 +116,7 @@ async def run_mr_loop(
         _write_json(master_dir / "mr_summary.json", summary)
         return summary
 
-    # ── [M1] 调用链分批 ───────────────────────────────────────
+    # ── [M1] call-chain batching ───────────────────────────────
     print("▶ [M1] 调用链分批")
     targets = [f.as_target() for f in trusted]
     strategy = split_by or "chain"
@@ -122,12 +127,13 @@ async def run_mr_loop(
             entrypoints=cfg.codegraph_entrypoints,
             index_dir=cfg.codegraph_index_dir,
         )
-    except Exception as e:  # noqa: BLE001 — chain 依赖索引健康，失败回退 file
+    except Exception as e:  # noqa: BLE001 -- chain depends on index health; fall back to file
         print(f"  ⚠️ {strategy} 分批失败（{e}），回退 file 策略")
         strategy = "file"
         batches, unreachable = callgraph.split_batches(targets, "file"), []
-    # unreachable（疑似死代码）单独成批仍进闭环：generate 会给真实结论，
-    # 但在报告里明确标注"入口不可达，疑似死代码/未接线"
+    # unreachable (likely dead code) forms its own batch but still enters the loop:
+    # gen gives a real verdict, while the report clearly marks "entry unreachable,
+    # likely dead code / not wired"
     if unreachable:
         batches = batches + [unreachable]
     _write_json(master_dir / "diff_batches.json", {
@@ -138,7 +144,7 @@ async def run_mr_loop(
     summary["split_by"] = strategy
     summary["unreachable"] = [list(t) for t in unreachable]
 
-    # ── [M2] 覆盖轨：逐批 run_loop（scope 收窄） ───────────────
+    # ── [M2] coverage track: per-batch run_loop (narrowed scope) ──
     if not skip_coverage and batches:
         print(f"▶ [M2] 覆盖轨（{len(batches)} 批，每批独立达标闭环）")
         first = True
@@ -161,8 +167,8 @@ async def run_mr_loop(
                 cfg,
                 func_target=func_target, cond_target=cond_target,
                 max_iter=max_iter,
-                skip_analyze=True,          # MR 模式不需要全项目需求解析
-                skip_build=not first,       # 首批构建，后续批复用插桩产物
+                skip_analyze=True,          # MR mode doesn't need whole-project requirement parsing
+                skip_build=not first,       # first batch builds; later batches reuse the instrumented artifacts
                 target_functions=batch,
                 target_context=target_context,
                 quiet=quiet,
@@ -179,7 +185,7 @@ async def run_mr_loop(
         done = sum(1 for b in summary["coverage_batches"] if b["status"] == "done")
         print(f"\n[M2] 覆盖轨完成：{done}/{len(batches)} 批达标")
 
-    # ── [M3] 扫描轨 ───────────────────────────────────────────
+    # ── [M3] scan track ─────────────────────────────────────────
     scan_result = None
     if not skip_scan and summary.get("exit_reason") != "codegraph_disabled":
         print("▶ [M3] 扫描轨（open-code-review 优先 / scan-agent 兜底 → 复现验证 → 四态裁决）")
@@ -195,7 +201,7 @@ async def run_mr_loop(
                          (scan_result.get("verdicts") or {}).items()},
         }
 
-    # ── [M4] 汇总报告 ─────────────────────────────────────────
+    # ── [M4] aggregate report ───────────────────────────────────
     batches_meta = summary.get("coverage_batches", [])
     done_count = sum(1 for b in batches_meta if b.get("status") == "done")
     summary["status"] = ("done" if batches_meta and done_count == len(batches_meta)
@@ -215,7 +221,7 @@ async def run_mr_loop(
 
 def _write_mr_report(cfg: ProjectConfig, summary: dict, ex: diffextract.DiffExtraction,
                      scan_result: dict | None, path: Path) -> None:
-    """MR 最终报告（双轨汇总）。"""
+    """MR final report (dual-track summary)."""
     counts = ex.to_dict()["counts"]
     L = [
         f"# AIcoverage MR 增量闭环报告 — {summary['master_run_id']}",
@@ -239,7 +245,7 @@ def _write_mr_report(cfg: ProjectConfig, summary: dict, ex: diffextract.DiffExtr
         L.append("## ⚠️ 改动行不在任何已索引函数内（需人工确认）")
         L.append("".join(f"- `{f}`\n" for f in ex.unresolved_files))
 
-    # 覆盖轨
+    # coverage track
     batches = summary.get("coverage_batches", [])
     if batches:
         done = sum(1 for b in batches if b.get("status") == "done")
@@ -263,7 +269,7 @@ def _write_mr_report(cfg: ProjectConfig, summary: dict, ex: diffextract.DiffExtr
     elif summary.get("exit_reason") == "no_changed_functions":
         L += ["## 覆盖轨结果", "", "无可信变更函数，未运行。", ""]
 
-    # 扫描轨
+    # scan track
     if scan_result is not None:
         L += [render_scan_markdown(scan_result), ""]
 

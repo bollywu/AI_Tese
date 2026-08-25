@@ -1,16 +1,17 @@
-"""AIcoverage 项目配置：单个 aicoverage.toml 描述一个被测 C/C++ 项目。
+"""AIcoverage project configuration: a single aicoverage.toml describes a target C/C++ project.
 
-核心设计（本文件是第一层）：
+Core design (this file is the first layer):
 
-| 常见耦合点                               | 本项目设计                                |
+| Common coupling point                    | This project's design                    |
 |-----------------------------------------|------------------------------------------|
-| 多文件环境配置 + 双路径体系               | 一份 aicoverage.toml（源码/测试/构建一体）|
-| 远程凭据 + 远程执行目标配置               | 不存在——本机构建、本地执行               |
-| profile 体系                             | 不需要——一个 TOML 即一个项目             |
-| 商业覆盖率工具（专有格式）                | gcc --coverage（gcov）                   |
-| 容器 / 远程 agent / RPC                  | subprocess 本地执行                      |
+| Multi-file env config + dual-path system | One aicoverage.toml (source/test/build)  |
+| Remote creds + remote execution targets  | None -- local build, local execution     |
+| Profile system                           | Not needed -- one TOML is one project    |
+| Commercial coverage tool (proprietary)   | gcc --coverage (gcov)                    |
+| Containers / remote agents / RPC         | subprocess local execution               |
 
-配置优先级：TOML 文件为唯一真源；个别字段可被 CLI 参数覆盖（func/cond/max-iter 等）。
+Config precedence: the TOML file is the single source of truth; individual
+fields may be overridden by CLI args (func/cond/max-iter etc.).
 """
 from __future__ import annotations
 
@@ -27,11 +28,11 @@ DEFAULT_EXCLUDE_GLOBS = ["deps/**", "third_party/**", "tests/**"]
 
 
 class ConfigError(SystemExit):
-    """配置错误（fail fast，启动阶段即报）。"""
+    """Configuration error (fail fast, reported at startup)."""
 
 
 def find_config(explicit: str | None = None) -> Path:
-    """定位 aicoverage.toml：CLI 参数 > 环境变量 > 当前目录。"""
+    """Locate aicoverage.toml: CLI arg > env var > current directory."""
     candidates: list[Path] = []
     if explicit:
         candidates.append(Path(explicit).expanduser())
@@ -58,88 +59,92 @@ class ProjectConfig:
     config_path: Path
     name: str
     display_name: str
-    language: str = "c"                      # c | cpp（影响函数提取与 agent 提示）
+    language: str = "c"                      # c | cpp (affects function extraction & agent hints)
     description: str = ""
 
-    # ── 被测源码 ──────────────────────────────────────────────
-    source_path: Path = Path(".")            # 源码/构建根目录（绝对路径）
+    # ── Target source ─────────────────────────────────────────
+    source_path: Path = Path(".")            # source/build root (absolute)
     include_globs: list[str] = field(default_factory=lambda: list(DEFAULT_INCLUDE_GLOBS))
     exclude_globs: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDE_GLOBS))
 
-    # ── 构建（插桩） ─────────────────────────────────────────
-    clean_cmd: str = ""                      # 可选，构建前清理
-    build_cmd: str = ""                      # 必填，需自带 --coverage 插桩
-    binary: Path | None = None               # 构建产物（绝对或相对 source_path）
+    # ── Build (instrumentation) ───────────────────────────────
+    clean_cmd: str = ""                      # optional, run before build
+    build_cmd: str = ""                      # required, must include --coverage instrumentation
+    binary: Path | None = None               # build artifact (absolute or relative to source_path)
 
-    # ── 测试 ─────────────────────────────────────────────────
-    test_dirname: str = "tests"              # 测试目录名（相对 source_path）
-    test_python: str = "auto"                # 跑 pytest 的解释器：auto | 绝对路径
-    test_timeout: int = 600                  # 单次 pytest 整体超时（秒），禁止 0
+    # ── Tests ─────────────────────────────────────────────────
+    test_dirname: str = "tests"              # test dir name (relative to source_path)
+    test_python: str = "auto"                # interpreter for pytest: auto | absolute path
+    test_timeout: int = 600                  # per-pytest timeout (sec), must be > 0
 
-    # ── 覆盖率（gcov） ───────────────────────────────────────
+    # ── Coverage (gcov) ───────────────────────────────────────
     gcov_bin: str = "gcov"
     func_target: float = 100.0
     cond_target: float = 85.0
 
-    # ── 闭环 ─────────────────────────────────────────────────
+    # ── Loop ──────────────────────────────────────────────────
     max_iter: int = 6
     no_progress_stop: int = 2
 
     # ── LLM / Agent ──────────────────────────────────────────
-    model: str = ""                        # 必填：所用 Agent SDK 支持的模型名
-    gen_model: str = ""                      # 留空 = 同 model
-    max_turns: int = 120                    # 单次 agent 调用最大工具轮次（复杂项目易触发
-                                            # context_overflow，80 偏小，2026-08-25 调至 120）
-    max_verify_retry: int = 3               # verify 失败修复回环最大次数（2 时复杂项目
-                                            # gen 修不完易假早停 verify_fail_exceeded，
-                                            # 2026-08-25 调至 3）
+    model: str = ""                        # required: model name supported by the Agent SDK
+    gen_model: str = ""                      # empty = same as model
+    max_turns: int = 120                    # max tool turns per agent call (complex projects
+                                            # hit context_overflow; 80 was too small, bumped
+                                            # to 120 on 2026-08-25)
+    max_verify_retry: int = 3               # max verify fix-loop rounds (at 2 complex projects
+                                            # gen often can't finish in time causing a false
+                                            # verify_fail_exceeded early-stop; bumped to 3)
     permission_mode: str = "bypassPermissions"
 
-    # ── 知识资源（全部可选） ─────────────────────────────────
-    kb_dir: Path | None = None               # 业务知识库目录
-    badcase_dir: Path | None = None          # 已废弃占位：badcase 由自动机制接管
-                                             # （<source>/.aicoverage/badcases.md，
-                                             # 见 aicoverage/badcase.py），无需配置
-    few_shots_dir: Path | None = None        # few-shot 用例示例
-    prompts_dir: Path | None = None          # 整份覆盖内置 prompts/<name>.md
+    # ── Knowledge resources (all optional) ────────────────────
+    kb_dir: Path | None = None               # business knowledge-base dir
+    badcase_dir: Path | None = None          # deprecated placeholder: badcases auto-managed
+                                             # (<source>/.aicoverage/badcases.md,
+                                             # see aicoverage/badcase.py), no config needed
+    few_shots_dir: Path | None = None        # few-shot test examples
+    prompts_dir: Path | None = None          # fully override built-in prompts/<name>.md
 
-    # ── 安全（hooks 额外命令黑名单，正则） ───────────────────
+    # ── Security (extra command blacklist for hooks, regex) ───
     extra_blocked_commands: list[str] = field(default_factory=list)
 
-    # ── 单元测试通道（e2e 不可达函数转单测，全部可选） ───────────
-    # 当某函数无法通过被测二进制的正常 E2E 流程触达（gap 根因 N1/N3/N5）时，
-    # gen-agent 可生成 test_driver_*.c 直接调用目标函数，用本段配置的编译器
-    # 以 --coverage 插桩编译出"单测 driver 二进制"并运行，从而覆盖该函数。
-    # gcov 按源码树扫 .gcno/.gcda，天然兼容（无需改采集逻辑）。
-    ut_compiler: str = ""                     # 空 = 跟随 build 体系；否则显式指定（gcc/g++/cc）
-    ut_flags: list[str] = field(default_factory=lambda: ["-O0", "-g", "-Wall"])  # 单测编译附加 flag
-    ut_link_libs: list[str] = field(default_factory=list)   # 额外链接库，如 ["-lm", "-lpthread"]
-    ut_obj_dir: str = ".aicoverage/ut"        # 单测中间产物目录（相对 source_path，.gcno/.gcda 落此）
+    # ── Unit-test channel (E2E-unreachable -> unit test, all optional) ──
+    # When a function cannot be reached through the binary's normal E2E flow
+    # (gap root causes N1/N3/N5), gen-agent may generate test_driver_*.c that
+    # calls the target function directly, using this section's compiler with
+    # --coverage to build a "unit-test driver binary" and run it, covering it.
+    # gcov scans the source tree for .gcno/.gcda, so this is natively compatible
+    # (no changes to collection logic needed).
+    ut_compiler: str = ""                     # empty = follow build system; else explicit (gcc/g++/cc)
+    ut_flags: list[str] = field(default_factory=lambda: ["-O0", "-g", "-Wall"])  # extra unit-test flags
+    ut_link_libs: list[str] = field(default_factory=list)   # extra link libs, e.g. ["-lm", "-lpthread"]
+    ut_obj_dir: str = ".aicoverage/ut"        # unit-test intermediate dir (relative to source_path; .gcno/.gcda here)
 
-    # ── CodeGraph（MR 增量闭环用，调用链分析/diff 行归因，全部可选）───
+    # ── CodeGraph (for MR incremental loop: call-graph/diff attribution, all optional) ──
     codegraph_enabled: bool = False
-    codegraph_index_dir: str = ".codegraph"          # 相对 source_path
+    codegraph_index_dir: str = ".codegraph"          # relative to source_path
     codegraph_entrypoints: list[str] = field(default_factory=lambda: ["main"])
 
-    # ── 扫描轨后端（open-code-review / 自研 scan-agent） ──────
+    # ── Scan-track backend (open-code-review / built-in scan-agent) ──
     scan_backend: str = "auto"   # auto | ocr | agent | off
-                                 # auto: ocr 可用且已配置则用之，否则降级 agent
-                                 # ocr: 强制 open-code-review（不可用则报错）
-                                 # agent: 强制自研 scan-agent
-                                 # off: 跳过扫描轨
+                                 # auto: use ocr if available & configured, else fall back to agent
+                                 # ocr: force open-code-review (error if unavailable)
+                                 # agent: force built-in scan-agent
+                                 # off: skip the scan track
 
-    # ── 运行期缓存（不入配置） ────────────────────────────────
+    # ── Runtime cache (not part of config) ────────────────────
     _source_files_cache: list | None = field(default=None, repr=False, compare=False)
 
-    # ── 工厂方法 ─────────────────────────────────────────────
+    # ── Factory methods ───────────────────────────────────────
     @classmethod
     def minimal(cls, source_path, *, name=None, build_cmd="", binary=None,
                 test_dirname="tests", language="c") -> "ProjectConfig":
-        """构造一个最小可用配置（确定性阶段的默认值自动填全）。
+        """Construct a minimal usable config (deterministic-phase defaults filled in).
 
-        用于测试/工具脚本里需要"只指定关键字段"的场景，避免手写
-        ProjectConfig.__new__ + 逐个赋值（缺字段会在运行时崩，见 to_env 依赖）。
-        所有可选字段走 dataclass 默认值，保证字段完整。
+        For tests/utility scripts that only need to specify key fields, avoiding
+        hand-writing ProjectConfig.__new__ + assigning each field (a missing field
+        crashes at runtime, see to_env dependency). All optional fields fall back
+        to dataclass defaults so every field is present.
         """
         src = Path(source_path).expanduser().resolve()
         return cls(
@@ -156,7 +161,7 @@ class ProjectConfig:
             max_iter=6, no_progress_stop=2,
         )
 
-    # ── 派生路径 ─────────────────────────────────────────────
+    # ── Derived paths ─────────────────────────────────────────
     @property
     def test_dir(self) -> Path:
         return self.source_path / self.test_dirname
@@ -171,7 +176,7 @@ class ProjectConfig:
 
     @property
     def workspace(self) -> Path:
-        """每个目标项目自己的 AIcoverage 工作区（runs/reports 全在这里）。"""
+        """Each target project's own AIcoverage workspace (runs/reports live here)."""
         return self.source_path / ".aicoverage"
 
     @property
@@ -191,7 +196,7 @@ class ProjectConfig:
 
     @property
     def ut_obj_path(self) -> Path:
-        """单测中间产物目录（.gcno/.gcda/obj 都落这里）。"""
+        """Unit-test intermediate dir (.gcno/.gcda/obj all land here)."""
         p = Path(self.ut_obj_dir)
         return p if p.is_absolute() else self.source_path / p
 
@@ -200,7 +205,7 @@ class ProjectConfig:
         return self.gen_model or self.model
 
     def validate(self) -> list[str]:
-        """启动阶段 fail-fast 校验，返回错误列表（空 = 通过）。"""
+        """Startup fail-fast validation; returns error list (empty = ok)."""
         errors: list[str] = []
         if not self.source_path.is_dir():
             errors.append(f"source.path 不存在或不是目录: {self.source_path}")
@@ -213,9 +218,10 @@ class ProjectConfig:
         return errors
 
     def source_files(self) -> list[Path]:
-        """按 include/exclude glob 匹配的源文件（绝对路径；`**` 为 gitignore 语义）。
+        """Source files matched by include/exclude globs (absolute; `**` uses gitignore semantics).
 
-        结果做实例级缓存（同一闭环内多次调用避免重复全量 rglob 扫描大项目）。
+        Result is cached per-instance (avoids repeated full rglob scans of large
+        projects within the same loop).
         """
         from .globutil import glob_matches
 
@@ -235,11 +241,11 @@ class ProjectConfig:
         return list(results)
 
     def invalidate_source_files(self) -> None:
-        """清空 source_files 缓存（若项目源码在运行期发生变化）。"""
+        """Clear the source_files cache (when project source changes at runtime)."""
         self._source_files_cache = None
 
     def to_env(self, run_dir: Path | None = None, iter_dir: Path | None = None) -> dict[str, str]:
-        """构造注入 agent 运行环境的关键变量（AICOV_* 系列）。"""
+        """Build the key env vars injected into agent runtimes (AICOV_* series)."""
         env = {
             "AICOV_CONFIG": str(self.config_path),
             "AICOV_SRC": str(self.source_path),
@@ -249,7 +255,8 @@ class ProjectConfig:
         }
         if self.binary_path is not None:
             env["AICOV_BINARY"] = str(self.binary_path)
-        # 单测通道环境（getattr 兜底：兼容 ProjectConfig.__new__ 直构的旧测试实例）
+        # Unit-test channel env (getattr fallback: tolerate old test instances built via
+        # ProjectConfig.__new__ without these fields)
         env["AICOV_UT_OBJ_DIR"] = str(getattr(self, "ut_obj_path", self.source_path / ".aicoverage" / "ut"))
         env["AICOV_UT_COMPILER"] = getattr(self, "ut_compiler", "") or "gcc"
         env["AICOV_UT_FLAGS"] = " ".join(getattr(self, "ut_flags", ["-O0", "-g", "-Wall"]))
@@ -262,7 +269,7 @@ class ProjectConfig:
 
 
 def _resolve_dir(base: Path, value: str) -> Path | None:
-    """知识目录解析：空 → None；相对路径相对 config 所在目录；绝对路径原样。"""
+    """Resolve a knowledge dir: empty -> None; relative resolved against the config's dir; absolute as-is."""
     v = (value or "").strip()
     if not v:
         return None
@@ -271,7 +278,7 @@ def _resolve_dir(base: Path, value: str) -> Path | None:
 
 
 def load_config(explicit_path: str | None = None) -> ProjectConfig:
-    """加载并校验 aicoverage.toml。"""
+    """Load and validate aicoverage.toml."""
     path = find_config(explicit_path)
     try:
         with path.open("rb") as f:

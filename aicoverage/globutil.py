@@ -1,11 +1,12 @@
-"""gitignore 风格的路径 glob 匹配（`**` 语义修正）。
+"""gitignore-style path glob matching (`**` semantics corrected).
 
-为什么不用 fnmatch：fnmatch 的 `*` 会跨 `/` 匹配，导致
-`src/**/*.c` 匹配不到 `src/wrk.c`（缺一层目录）、`*.c` 却能匹配
-`a/b.c`——两者都与直觉相反。本模块实现 gitignore 语义：
+Why not fnmatch: fnmatch's `*` crosses `/`, so `src/**/*.c` fails to match
+`src/wrk.c` (missing a directory level) while `*.c` matches `a/b.c` -- both are
+counter-intuitive. This module implements gitignore semantics:
 
-- `**` 段匹配零个或多个路径段（`src/**/*.c` 同时命中 `src/a.c` 与 `src/x/y/a.c`）
-- 普通段内 `*`/`?` 不跨 `/`
+- a `**` segment matches zero or more path segments (`src/**/*.c` hits both
+  `src/a.c` and `src/x/y/a.c`)
+- within a normal segment `*`/`?` do not cross `/`
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ def _match_parts(r_parts: tuple[str, ...], p_parts: tuple[str, ...]) -> bool:
     if not p_parts:
         return not r_parts
     if p_parts[0] == "**":
-        # '**' 匹配零个或多个段
+        # '**' matches zero or more segments
         for skip in range(len(r_parts) + 1):
             if _match_parts(r_parts[skip:], p_parts[1:]):
                 return True
@@ -38,5 +39,5 @@ def match_one(rel_path: str, pattern: str) -> bool:
 
 
 def glob_matches(rel_path: str, patterns: list[str]) -> bool:
-    """rel_path 是否命中任一 pattern（patterns 为空时返回 False）。"""
+    """Whether rel_path matches any pattern (False when patterns is empty)."""
     return any(match_one(rel_path, p) for p in patterns)

@@ -1,10 +1,12 @@
-"""插桩构建驱动：clean → build → 校验（二进制存在 + .gcno 生成）。
+"""Instrumented-build driver: clean -> build -> verify (binary exists + .gcno generated).
 
-构建命令完全由项目配置提供（aicoverage.toml 的 [build]），AIcoverage 不假设
-构建系统（make/cmake/自定义脚本均可），只验证两件事：
-  1. build_cmd 退出码为 0
-  2. 构建后源码树出现 .gcno 文件（证明 --coverage 插桩真的生效了）
-     —— 本机版防线：插桩构建后立即校验 gcno 是否真实生成。
+The build command is entirely project-provided (aicoverage.toml's [build]).
+AIcoverage does not assume any build system (make/cmake/custom scripts all fine);
+it only verifies two things:
+  1. build_cmd exits with code 0
+  2. .gcno files appear in the source tree after build (proving --coverage
+     instrumentation actually took effect)
+     -- local version's defense: verify gcno really generated right after build.
 """
 from __future__ import annotations
 
@@ -35,7 +37,7 @@ class BuildResult:
 
 
 def run_shell(cmd: str, cwd: Path, timeout: int = 3600) -> tuple[int, str, float]:
-    """执行 shell 命令，返回 (rc, 合并日志, 耗时秒)。"""
+    """Run a shell command, return (rc, merged log, elapsed seconds)."""
     import time
 
     start = time.time()
@@ -54,7 +56,7 @@ def run_shell(cmd: str, cwd: Path, timeout: int = 3600) -> tuple[int, str, float
 
 
 def build(cfg: ProjectConfig, *, skip_clean: bool = False, log_dir: Path | None = None) -> BuildResult:
-    """执行插桩构建并校验。"""
+    """Run the instrumented build and verify it."""
     result = BuildResult(ok=False, binary=cfg.binary_path)
 
     logs: list[str] = []
@@ -62,7 +64,7 @@ def build(cfg: ProjectConfig, *, skip_clean: bool = False, log_dir: Path | None 
         rc, log, dur = run_shell(cfg.clean_cmd, cfg.source_path)
         logs.append(f"$ {cfg.clean_cmd}\n(rc={rc}, {dur:.1f}s)\n{log[-4000:]}")
         if rc != 0:
-            # clean 失败不致命（首次构建可能本就无产物可清）
+            # clean failure is not fatal (first build may have nothing to clean)
             logs.append("⚠ clean 命令非零退出（忽略，继续构建）")
 
     rc, log, dur = run_shell(cfg.build_cmd, cfg.source_path)

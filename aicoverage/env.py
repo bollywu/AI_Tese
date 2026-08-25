@@ -1,8 +1,9 @@
-"""环境变量加载：.env 文件（认证等环境级配置，非项目配置）。
+"""Environment variable loading: .env files (auth and other environment-level config, not project config).
 
-与项目配置（aicoverage.toml）分离——认证是「环境」问题，不是「项目」问题。
-查找顺序：$AICOV_ENV 指定文件 > AIcoverage/.env。已有环境变量不覆盖
-（命令行 export 优先）。AIcoverage/.env 不存在时静默跳过。
+Separated from project config (aicoverage.toml) -- auth is an "environment" concern,
+not a "project" one. Lookup order: $AICOV_ENV-specified file > AIcoverage/.env.
+Existing env vars are not overwritten (command-line export wins). Silently skipped
+when AIcoverage/.env does not exist.
 """
 from __future__ import annotations
 

@@ -1,11 +1,14 @@
-"""C/C++ 源码静态解析：函数清单提取（供 analyzer 阶段 / 报告展示）。
+"""C/C++ source static parsing: function-inventory extraction (for analyzer phase / reports).
 
-注意：覆盖率闭环的**权威**函数清单来自 gcov JSON（gcov -i 对每个插桩编译单元
-都会枚举全部函数，含未执行者，精确到行号），本模块只是构建前的轻量静态扫描，
-用于需求解析阶段给 analyzer-agent 提供"项目里有哪些函数"的全景。
+Note: the authoritative function list for the coverage loop comes from gcov JSON
+(gcov -i enumerates every function in each instrumented compilation unit,
+including unexecuted ones, precise to line numbers). This module is only a light
+static scan before the build, giving the analyzer-agent a panorama of "what
+functions exist" during requirement parsing.
 
-实现：括号深度扫描 + 行首启发式匹配，不依赖 ctags（保持零外部工具依赖；
-ctags 存在时优先用 ctags 提升准确度）。
+Implementation: brace-depth scan + line-start heuristic matching, no ctags
+dependency (keeps zero external-tool dependency; uses ctags for better accuracy
+when available).
 """
 from __future__ import annotations
 
@@ -15,19 +18,20 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-# 函数定义启发式：[修饰/返回类型] name(args...) { 开头
-# 排除控制流关键字；C++ 的 ::（类外定义）与运算符重载简单放行。
+# Function-def heuristic: [modifier/return-type] name(args...) { start
+# Exclude control-flow keywords; C++ :: (out-of-class definition) and operator
+# overloads are passed through simply.
 _KEYWORDS = {
     "if", "for", "while", "switch", "catch", "return", "else", "do",
     "sizeof", "defined", "case", "default",
 }
 
 _FUNC_HEAD = re.compile(
-    r"^(?P<sig>(?:[A-Za-z_][\w:]*(?:<[^;{}]*>)?\s+)+"  # 返回类型（含模板）
-    r"|(?:static|inline|extern|virtual|explicit)\s+)?"   # 或仅有修饰符开头
-    r"(?P<name>[A-Za-z_~][\w:<>~]*)\s*"                  # 函数名（含 Class::method）
-    r"\((?:[^;{}()]|\([^()]*\))*\)\s*"                    # 参数表（允许嵌套一层括号）
-    r"(?:const\s*)?(?:noexcept\s*)?(?:->\s*[\w:<>&*\s]+)?$"  # 尾置返回/noexcept
+    r"^(?P<sig>(?:[A-Za-z_][\w:]*(?:<[^;{}]*>)?\s+)+"  # return type (incl. templates)
+    r"|(?:static|inline|extern|virtual|explicit)\s+)?"   # or a bare modifier start
+    r"(?P<name>[A-Za-z_~][\w:<>~]*)\s*"                  # function name (incl. Class::method)
+    r"\((?:[^;{}()]|\([^()]*\))*\)\s*"                    # parameter list (one nesting level)
+    r"(?:const\s*)?(?:noexcept\s*)?(?:->\s*[\w:<>&*\s]+)?$"  # trailing return/noexcept
 )
 
 _LINE_COMMENT = re.compile(r"//.*$")
@@ -36,10 +40,10 @@ _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 
 @dataclass
 class FunctionInfo:
-    file: str          # 相对源码根的路径
-    name: str          # 函数名（C++ 含类限定）
-    line: int          # 定义起始行
-    signature: str     # 单行签名摘要
+    file: str          # path relative to source root
+    name: str          # function name (C++ includes class qualification)
+    line: int          # definition start line
+    signature: str     # single-line signature summary
 
     def to_dict(self) -> dict:
         return {"file": self.file, "name": self.name, "line": self.line,
@@ -53,7 +57,7 @@ def _strip_comments(text: str) -> str:
 
 
 def extract_functions_source(path: Path, source_root: Path) -> list[FunctionInfo]:
-    """单个 .c/.cpp 文件的函数提取（括号深度启发式）。"""
+    """Function extraction for a single .c/.cpp file (brace-depth heuristic)."""
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -69,7 +73,8 @@ def extract_functions_source(path: Path, source_root: Path) -> list[FunctionInfo
             m = _FUNC_HEAD.match(stripped)
             if m:
                 name = m.group("name")
-                # 函数体必须在后续若干行内出现 "{"（避免把声明/调用当定义）
+                # The function body must contain "{" within the next few lines
+                # (avoids treating declarations/calls as definitions)
                 lookahead = "\n".join(lines[i - 1: i + 4])
                 if "{" in lookahead and name not in _KEYWORDS and len(name) > 1:
                     results.append(FunctionInfo(
@@ -83,7 +88,7 @@ def extract_functions_source(path: Path, source_root: Path) -> list[FunctionInfo
 
 
 def extract_functions_ctags(source_root: Path, files: list[Path]) -> list[FunctionInfo] | None:
-    """ctags 可用时优先走 ctags（准确度更高）；不可用返回 None 走正则。"""
+    """Prefer ctags when available (more accurate); return None to fall back to regex."""
     ctags = shutil.which("ctags")
     if not ctags:
         return None
@@ -124,7 +129,7 @@ def extract_functions_ctags(source_root: Path, files: list[Path]) -> list[Functi
 
 
 def function_inventory(files: list[Path], source_root: Path) -> list[FunctionInfo]:
-    """全量函数清单：ctags 优先，正则兜底。"""
+    """Full function inventory: ctags first, regex as fallback."""
     if not files:
         return []
     via_ctags = extract_functions_ctags(source_root, files)

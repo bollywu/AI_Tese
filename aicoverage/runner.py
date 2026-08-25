@@ -1,15 +1,15 @@
-"""AgentRunner：Agent SDK 调用封装（通用化）。
+"""AgentRunner: Agent SDK call wrapper (generalized).
 
-实现要点（均为实战踩坑结论，行为保持一致）：
-- 单 agent 模式用 AppendSystemPrompt 注入 prompts/<name>.md（2026-08-11 修复：
-  否则核心铁律从未进入上下文）
-- options.tools 才是工具白名单（allowed_tools 只是免确认名单，不起限制作用）
-- 活性超时（idle timeout）：持续思考不产出 → 判失败走退避重试（2026-08-17）
-- 幻觉检测：tool_uses=0 判失败（重试分类见 agent_call.py）
-- hooks 必须每次构造 options 都显式传入（2026-07-17 修复）
+Implementation notes (all conclusions from production incidents; behavior stays consistent):
+- Single-agent mode injects prompts/<name>.md via AppendSystemPrompt (2026-08-11 fix:
+  otherwise the core iron rules never enter context)
+- options.tools is the real tool whitelist (allowed_tools is only a no-confirm list, not a restriction)
+- Idle timeout: sustained thinking without output -> judged failed, go backoff-retry (2026-08-17)
+- Hallucination detection: tool_uses=0 judged failed (retry classification in agent_call.py)
+- Hooks must be explicitly passed every time options is constructed (2026-07-17 fix)
 
-环境变量统一为 AICOV_* 前缀；Agent CLI binary 自动探测。
-SDK 采用惰性导入——纯确定性阶段（build/coverage/report）不依赖 SDK。
+Env vars uniformly use the AICOV_* prefix; the Agent CLI binary is auto-detected.
+The SDK is lazily imported -- pure-deterministic phases (build/coverage/report) don't depend on it.
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ AGENT_DISPATCH_TOOLS = ["Agent", "Task"]
 
 
 def _find_codebuddy_cli() -> str | None:
-    """自动探测 Agent CLI binary。"""
+    """Auto-detect the Agent CLI binary."""
     try:
         from codebuddy_agent_sdk._binary import get_cli_path
         path = get_cli_path()
@@ -90,7 +90,7 @@ class AgentRunResult:
 
 
 class AgentRunner:
-    """每个 agent 调用都无状态（对应"无状态铁律"），上下文通过文件系统传递。"""
+    """Every agent call is stateless (the "statelessness iron rule"); context is passed via the filesystem."""
 
     def __init__(self, cfg: ProjectConfig, *, quiet: bool = False,
                  run_dir: Path | None = None, iter_dir: Path | None = None):
@@ -128,9 +128,9 @@ class AgentRunner:
         permission_mode: str | None = None,
         prompt_override: str | None = None,
     ) -> AgentRunResult:
-        """prompt_override：整份替换该次调用的 system prompt（如扫描轨用
-        scan_gen_agent.md 替换 gen-agent 的默认 prompt——工具白名单/hooks
-        沿用 gen-agent，语义换为缺陷复现变体）。None = 用默认加载。"""
+        """prompt_override: fully replace this call's system prompt (e.g. the scan track uses
+        scan_gen_agent.md to replace gen-agent's default prompt -- the tool whitelist/hooks
+        stay gen-agent's, the semantics become the defect-repro variant). None = load default."""
         from codebuddy_agent_sdk import CodeBuddySDKClient, CodeBuddyAgentOptions, AppendSystemPrompt
         from .hooks import make_security_hooks
 
@@ -191,7 +191,7 @@ class AgentRunner:
             self._process_message(msg, result)
 
     def _process_message(self, msg: Any, result: AgentRunResult) -> None:
-        """处理 SDK 消息流（dataclass 与 dict 两种形式兼容）。"""
+        """Process the SDK message stream (handles both dataclass and dict forms)."""
         from codebuddy_agent_sdk import (
             AssistantMessage, ResultMessage, TextBlock, ToolUseBlock,
             ToolResultBlock, ThinkingBlock,

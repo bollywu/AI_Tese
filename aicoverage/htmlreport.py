@@ -1,27 +1,31 @@
-"""HTML 覆盖率报告生成器（零第三方依赖，纯标准库）。
+"""HTML coverage-report generator (zero third-party deps, pure standard library).
 
-报告形态为经典覆盖率工具的层级下钻式 HTML（iframe 三栏布局），核心特征：
+The report is the classic coverage tool's hierarchical drill-down HTML (iframe three-pane
+layout). Core features:
 
-1. **iframe 三栏布局**：左侧可折叠目录树导航，右侧内容区（可拖动分隔条）
-2. **四列指标体系**（每一层级都有）：
+1. **iframe three-pane layout**: left collapsible directory-tree nav, right content area
+   (draggable splitter)
+2. **Four-column metric system** (at every level):
    `Function coverage` / `Uncovered functions` / `Condition/decision coverage` / `Uncovered C/D`
-3. **层级下钻**：`test.cov`（根）→ 目录 → 文件 → **函数**（每个函数一行，显示其
-   自身的函数覆盖与条件/决策覆盖），点击函数名跳到源码页对应锚点
-4. **源码页**：函数定义行标 ✔（已覆盖）/ ✘（未覆盖），分支行标 `TF`
-   （T=true 分支命中、F=false 分支命中，未命中的方向标红），逐行着色
+3. **Hierarchical drill-down**: `test.cov` (root) -> dir -> file -> **function** (one row per
+   function showing its own function & condition/decision coverage); clicking a function name
+   jumps to the source page's anchor
+4. **Source page**: function-definition lines marked ✔ (covered) / ✘ (uncovered), branch lines
+   marked `TF` (T=true-branch hit, F=false-branch hit; unhit directions red), line-by-line coloring
 
-实现说明（数据源为本机 gcov）：
-- 「条件/决策覆盖」由 gcov 的分支（branch）数据等价映射（至少命中一次的分支方向占比）
-- 色条用纯 CSS 进度条实现（避免二进制资源，报告可纯文本 diff）
+Implementation notes (data source is local gcov):
+- "Condition/decision coverage" is an equivalent mapping from gcov branch data (share of branch
+  directions hit at least once)
+- Color bars use pure CSS progress bars (no binary assets; the report is plain-text diffable)
 
-输出结构：
+Output layout:
 
-    <out>/index.html            iframe 框架页（入口）
-    <out>/nav.html              左侧目录树导航
-    <out>/summary.html          右侧默认内容（根层级汇总）
-    <out>/d_<slug>.html         目录层级页（含子目录/文件四列指标）
-    <out>/f_<slug>.html         文件层级页（含该文件全部函数的四列指标）
-    <out>/s_<slug>.html         源码页（函数锚点 + 逐行着色 + TF 分支标注）
+    <out>/index.html            iframe frame page (entry)
+    <out>/nav.html              left directory-tree nav
+    <out>/summary.html          right default content (root-level summary)
+    <out>/d_<slug>.html         directory-level page (subdir/file four-column metrics)
+    <out>/f_<slug>.html         file-level page (all functions' four-column metrics)
+    <out>/s_<slug>.html         source page (function anchors + line coloring + TF branch marks)
     <out>/style.css
 """
 from __future__ import annotations
@@ -102,11 +106,11 @@ h1.title { font-size: 15px; margin: 0 0 2px; font-weight: 600; }
 """
 
 
-# ── 指标聚合 ────────────────────────────────────────────────────────
+# ── Metric aggregation ─────────────────────────────────────────────────
 
 @dataclass
 class Metrics:
-    """一个层级（根/目录/文件/函数）的四列指标。"""
+    """Four-column metrics for one level (root/dir/file/function)."""
     func_total: int = 0
     func_hit: int = 0
     branch_total: int = 0
@@ -137,10 +141,10 @@ class Metrics:
 
 @dataclass
 class Node:
-    """目录树节点（dir 或 file）。"""
+    """Directory-tree node (dir or file)."""
     name: str
     kind: str                     # "dir" | "file"
-    rel: str = ""                 # file 节点：相对源码根路径
+    rel: str = ""                 # for file nodes: path relative to source root
     children: dict[str, "Node"] = field(default_factory=dict)
     metrics: Metrics = field(default_factory=Metrics)
 
@@ -165,7 +169,7 @@ def _file_metrics(fc: FileCov) -> Metrics:
 
 
 def _build_tree(report: CoverageReport) -> Node:
-    """按路径层级构建目录树，自底向上聚合指标。"""
+    """Build the directory tree by path hierarchy, aggregating metrics bottom-up."""
     root = Node(name=ROOT_LABEL, kind="dir", rel="")
     for rel, fc in sorted(report.files.items()):
         parts = rel.split("/")
@@ -196,14 +200,14 @@ def _build_tree(report: CoverageReport) -> Node:
     return root
 
 
-# ── 渲染基元 ────────────────────────────────────────────────────────
+# ── Rendering primitives ──────────────────────────────────────────────
 
 def _gauge_cls(pct: float) -> str:
     return "g-hi" if pct >= 80 else ("g-mid" if pct >= 50 else "g-lo")
 
 
 def _pct_cell(pct: float | None) -> str:
-    """百分比 + CSS 色条。"""
+    """Percentage + CSS color bar."""
     if pct is None:
         return '<td class="num dim">&mdash;</td>'
     return (f'<td class="num"><span class="pctwrap">'
@@ -251,7 +255,7 @@ def _stamp(created: str, project: str, run_id: str) -> str:
 
 
 def _crumb(node: Node, by_rel: dict[str, Node]) -> str:
-    """面包屑：coverage/ dir/ dir/ file.c（层级导航链接）。"""
+    """Breadcrumb: coverage/ dir/ dir/ file.c (hierarchical nav links)."""
     links = [f'<a href="d_{_slug("")}.html">{ROOT_LABEL}/</a>']
     if node.rel:
         parts = node.rel.split("/")
@@ -266,7 +270,7 @@ def _crumb(node: Node, by_rel: dict[str, Node]) -> str:
     return '<p class="crumb">' + " ".join(links) + "</p>"
 
 
-# ── 页面生成 ────────────────────────────────────────────────────────
+# ── Page generation ──────────────────────────────────────────────────
 
 def generate(
     report: CoverageReport,
@@ -277,7 +281,7 @@ def generate(
     run_id: str = "",
     extra_links: dict[str, str] | None = None,
 ) -> Path:
-    """生成层级下钻式 HTML 报告，返回 index.html（iframe 框架页）路径。"""
+    """Generate the hierarchical drill-down HTML report; returns the index.html (iframe frame) path."""
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "style.css").write_text(_STYLE, encoding="utf-8")
 
@@ -295,7 +299,7 @@ def generate(
 
     index_nodes(root)
 
-    # 目录层级页 + 文件层级页 + 源码页
+    # directory-level pages + file-level pages + source pages
     for node in by_rel.values():
         if node.kind == "dir":
             (out_dir / node.page).write_text(
@@ -310,7 +314,7 @@ def generate(
             (out_dir / f"s_{_slug(node.rel)}.html").write_text(
                 _source_page(node, fc, by_rel, stamp, source_root), encoding="utf-8")
 
-    # 左侧导航 + iframe 框架
+    # left nav + iframe frame
     (out_dir / "nav.html").write_text(_nav_page(root), encoding="utf-8")
     title = f"覆盖率报告{f' - {project_name}' if project_name else ''}"
     index_path = out_dir / "index.html"
@@ -348,7 +352,7 @@ def _dir_page(node: Node, by_rel: dict[str, Node], stamp: str,
 
 
 def _file_page(node: Node, fc: FileCov, by_rel: dict[str, Node], stamp: str) -> str:
-    """文件层级页：**每个函数一行**，显示该函数自身的覆盖结果（核心视图）。"""
+    """File-level page: **one row per function**, showing that function's own coverage result (the core view)."""
     src_page = f"s_{_slug(node.rel)}.html"
     rows = [_TABLE_HEAD]
     rows.append(f'<tr class="first"><td class="name">'
@@ -356,7 +360,7 @@ def _file_page(node: Node, fc: FileCov, by_rel: dict[str, Node], stamp: str) -> 
                 f'<a href="{src_page}">{html.escape(node.name)}</a></td>'
                 f"{_metric_cells(node.metrics)}</tr>")
 
-    # 每个函数的分支归属：按函数名匹配 gcov 的 branches.function
+    # each function's branch attribution: match gcov's branches.function by function name
     fn_branches: dict[str, list] = {}
     for b in fc.branches:
         fn_branches.setdefault(b.function, []).append(b)
@@ -369,7 +373,7 @@ def _file_page(node: Node, fc: FileCov, by_rel: dict[str, Node], stamp: str) -> 
         )
         mark = ('<span class="ico fnhit">&#10004;</span>' if f.hit
                 else '<span class="ico fnmiss">&#10008;</span>')
-        # 仅单测 driver 覆盖（E2E 未命中）的函数加 UT 徽标，来源一目了然
+        # functions covered only by unit-test driver (E2E-missed) get a UT badge for clarity
         ut_badge = ('<span class="ut-badge" title="仅由单测 driver 直接调用覆盖，'
                     'E2E 流程未触达">UT</span>' if f.ut_hit else "")
         rows.append(
@@ -392,7 +396,7 @@ def _file_page(node: Node, fc: FileCov, by_rel: dict[str, Node], stamp: str) -> 
 
 def _source_page(node: Node, fc: FileCov, by_rel: dict[str, Node], stamp: str,
                  source_root: Path) -> str:
-    """源码页：函数定义行标 ✔/✘ + 分支行标 TF + 逐行着色（源码视图）。"""
+    """Source page: function-def lines marked ✔/✘ + branch lines marked TF + line-by-line coloring (source view)."""
     body = [stamp, _crumb(node, by_rel), "<hr>"]
     body.append(
         '<p class="legend">行首标记：<b class="fnhit">&#10004;</b> 函数已覆盖 · '
@@ -412,11 +416,11 @@ def _source_page(node: Node, fc: FileCov, by_rel: dict[str, Node], stamp: str,
         body.append('<p class="dim">读取源文件失败</p>')
         return _page(node.rel, "".join(body))
 
-    # 行 → 函数（定义起始行）
+    # line -> function (definition start line)
     fn_at_line: dict[int, list] = {}
     for f in fc.functions.values():
         fn_at_line.setdefault(f.start_line, []).append(f)
-    # 行 → 分支
+    # line -> branch
     br_at_line: dict[int, list] = {}
     for b in fc.branches:
         br_at_line.setdefault(b.line, []).append(b)
@@ -456,7 +460,7 @@ def _source_page(node: Node, fc: FileCov, by_rel: dict[str, Node], stamp: str,
 
 
 def _nav_page(root: Node) -> str:
-    """左侧目录树导航（含每层覆盖率摘要）。"""
+    """Left directory-tree navigation (with per-level coverage summary)."""
     def render(node: Node) -> str:
         items = []
         for child in sorted(node.children.values(),
@@ -480,7 +484,7 @@ def _nav_page(root: Node) -> str:
 
 
 def _frame_page(title: str, content_page: str) -> str:
-    """iframe 框架页（左导航 + 可拖动分隔条 + 右内容）。"""
+    """iframe frame page (left nav + draggable splitter + right content)."""
     return f"""<!DOCTYPE html>
 <html lang="zh-CN" style="height:100%"><head><meta charset="utf-8">
 <title>{html.escape(title)}</title>

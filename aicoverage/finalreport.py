@@ -1,16 +1,17 @@
-"""最终报告生成器：把一次闭环的全部产物汇总为人可读的 Markdown。
+"""Final-report generator: aggregates all artifacts of one loop into human-readable Markdown.
 
-报告章节（对应"评审者不看 JSON 就能复核"的目标）：
-  1. 概览            —— 项目/需求/达标线/结论/最终覆盖率
-  2. 每轮增量明细     —— 每轮覆盖率变化（绝对值 + Δpp + 新命中函数数）+ 各阶段结论
-  3. 用例执行结果     —— 每轮 junit 统计（用例数/通过/失败/错误/跳过/耗时）+ 失败用例归因
-  4. 用例清单        —— 逐文件列出用例函数（来自 manifest + 磁盘实测），标注所属轮次
-  5. 未覆盖原因分析   —— 逐函数给出根因编码(N1-N6)/证据/建议，区分"可补"与"噪声/不可达"
-  6. 疑似产品缺陷     —— quality-agent 判定的 report_bug
-  7. 产物索引        —— HTML 报告地址（含打开方式）+ 各类 JSON 路径
+Report sections (aligned with the "reviewers can re-check without reading JSON" goal):
+  1. Overview          -- project/requirement/threshold/conclusion/final coverage
+  2. Per-round delta    -- per-round coverage change (absolute + Δpp + new-hit-function count) + per-stage conclusion
+  3. Test execution     -- per-round junit stats (case/pass/fail/error/skip/duration) + failed-case attribution
+  4. Case inventory     -- list test functions per file (from manifest + on-disk scan), tagged by round
+  5. Uncovered analysis -- per-function root-cause code (N1-N6)/evidence/suggestion, distinguishing "fillable" vs "noise/unreachable"
+  6. Suspected defects  -- quality-agent-adjudicated report_bug
+  7. Artifact index     -- HTML report URL (with how to open) + all JSON paths
 
-设计原则：所有数字与结论都来自磁盘产物（loop_state/junit/execution/gap_items/
-manifest/quality_report/coverage.json），本模块只做汇总排版，不做任何推断。
+Design principle: all numbers and conclusions come from on-disk artifacts
+(loop_state/junit/execution/gap_items/manifest/quality_report/coverage.json); this module only
+summarizes/lays out, it never infers.
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ from pathlib import Path
 from .config import ProjectConfig
 from .gcov import CoverageReport
 
-# 根因编码 → 人类可读说明（与 prompts/coverage_agent.md 的分类体系一致）
+# root-cause code -> human-readable note (consistent with prompts/coverage_agent.md's taxonomy)
 CAUSE_LABELS: dict[str, str] = {
     "N1": "需要特定运行环境/多进程/信号（黑盒难触达）",
     "N2": "需要网络对端/真实协议交互",
@@ -160,7 +161,7 @@ def _uncovered_reasons(run_dir: Path) -> dict[tuple[str, str], dict]:
                                                  "priority": "", "evidence": "",
                                                  "suggestion": "", "iter": 0})
                 entry["verdict"] = it.get("verdict") or bucket
-                # gen-agent 的 reason 通常最完整，优先作为证据
+                # gen-agent's reason is usually the most complete; prefer it as evidence
                 if it.get("reason"):
                     entry["evidence"] = it["reason"]
                 entry["group"] = "不可达/无收益"
@@ -175,17 +176,18 @@ def write_final_report(
     path: Path,
     html_index: Path | None = None,
 ) -> None:
-    """生成最终 Markdown 报告。"""
+    """Generate the final Markdown report."""
     run_dir = runs_dir / run_id
     L: list[str] = []
-    # 章节自动编号：保证五项必备内容编号连续，且不会因某章节缺席而跳号
+    # auto-number sections: keeps the five required sections numbered consecutively without
+    # skipping numbers when a section is absent
     _sec = {"n": 0}
 
     def sec(title: str) -> None:
         _sec["n"] += 1
         L.append(f"## {_sec['n']}. {title}")
 
-    # ── 1. 概览 ────────────────────────────────────────────────
+    # ── 1. Overview ─────────────────────────────────────────────
     L += [f"# AIcoverage 闭环报告 — {run_id}", ""]
     L.append(f"- **项目**：{cfg.display_name}（`{cfg.source_path}`）")
     if state.get("requirement"):
@@ -216,7 +218,7 @@ def write_final_report(
         L.append(f"- **HTML 覆盖率报告**：`{html_index}`")
     L.append("")
 
-    # ── 2. 每轮增量明细 ────────────────────────────────────────
+    # ── 2. Per-round delta ─────────────────────────────────────
     sec("每轮覆盖率增量")
     L.append("")
     L.append("| 轮次 | 用例产出 | 执行结论 | 函数覆盖 | Δ函数 | 分支覆盖 | Δ分支 | 本轮新命中函数 |")
@@ -252,7 +254,7 @@ def write_final_report(
             L.append(f"| {r['iter']} | {r['gap']} | {r['gen']} | {r['verify']} | {r['quality']} |")
         L.append("")
 
-    # ── 3. 用例执行结果 ────────────────────────────────────────
+    # ── 3. Test execution results ──────────────────────────────
     sec("用例执行结果")
     L.append("")
     L.append("| 轮次 | verdict | 用例数 | 通过 | 失败 | 错误 | 跳过 | 耗时(s) |")
@@ -300,7 +302,7 @@ def write_final_report(
         L.append("最后一轮执行无失败/错误用例。")
         L.append("")
 
-    # ── 4. 用例清单 ────────────────────────────────────────────
+    # ── 4. Case inventory ──────────────────────────────────────
     disk_cases = _collect_test_functions(cfg.test_dir)
     created, modified = _gen_origin(run_dir)
     total_funcs = sum(len(v) for v in disk_cases.values())
@@ -324,7 +326,7 @@ def write_final_report(
             L.append(f"  - `{fn}`")
     L.append("")
 
-    # ── 5. 未覆盖原因分析（必备章节）────────────────────────────
+    # ── 5. Uncovered-reason analysis (required section) ────────
     reasons = _uncovered_reasons(run_dir)
     unc = final_report.uncovered_functions() if final_report is not None else []
     if final_report is None:
@@ -376,7 +378,7 @@ def write_final_report(
             L.append("✅ 无未覆盖函数（全部函数均已被执行）。")
             L.append("")
 
-    # ── 6. 疑似产品缺陷 ────────────────────────────────────────
+    # ── 6. Suspected product defects ───────────────────────────
     bugs: list[dict] = []
     for d in _iter_dirs(run_dir):
         q = _load_json(d / "quality_report.json") or {}
@@ -390,7 +392,7 @@ def write_final_report(
             L.append(f"- **{b.get('file', '?')}**（iter {b['iter']}）：{b.get('suggestion', '')}")
         L.append("")
 
-    # ── 7. 产物索引 ────────────────────────────────────────────
+    # ── 7. Artifact index ──────────────────────────────────────
     sec("产物索引")
     L.append("")
     if html_index is not None:
@@ -420,7 +422,7 @@ def write_final_report(
     path.write_text("\n".join(L) + "\n", encoding="utf-8")
 
 
-# ── 辅助 ────────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────
 
 def _cell(text: str, limit: int = 200) -> str:
     """Markdown 表格单元格：压缩空白、转义竖线、截断。"""

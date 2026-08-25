@@ -1,16 +1,17 @@
-"""脚手架：在目标项目中生成 aicoverage.toml + tests/ harness。
+"""Scaffolding: generate aicoverage.toml + tests/ harness in the target project.
 
-模板以字符串形式内嵌（避免 package-data 安装路径问题）。
-harness.py 是"原子函数 → 用例搭积木"方法论的落地载体：
-用例只能调 harness 原子函数，新验证维度先扩展 harness。
+Templates are embedded as strings (avoids package-data install-path issues).
+harness.py is the concrete carrier of the "atomic functions -> case building blocks"
+methodology: cases may only call harness atomic functions; new verification dimensions
+are added by extending harness first.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 CONFIG_TEMPLATE = """\
-# AIcoverage 项目配置 — 一个 TOML 描述一个被测 C/C++ 项目
-# 文档：https://github.com/yourorg/AIcoverage（示例）
+# AIcoverage project config -- one TOML describes one target C/C++ project
+# docs: https://github.com/yourorg/AIcoverage (example)
 [project]
 name = "{name}"
 display_name = "{name}"
@@ -19,20 +20,21 @@ description = ""
 
 [source]
 path = "."
-# 参与覆盖率统计/函数提取的源文件（glob，相对 source.path）
+# source files included in coverage stats / function extraction (glob, relative to source.path)
 include_globs = ["src/**/*.c", "src/**/*.cc", "src/**/*.cpp", "src/**/*.cxx"]
 exclude_globs = ["deps/**", "third_party/**", "tests/**"]
 
 [build]
-# 插桩构建命令：必须让编译器生成 .gcno（即 -fprofile-arcs -ftest-coverage / --coverage）
+# instrumented build command: must make the compiler emit .gcno
+# (i.e. -fprofile-arcs -ftest-coverage / --coverage)
 clean_cmd = ""
 build_cmd = "{build_cmd}"
 binary = "{binary}"
 
 [test]
-dir = "tests"          # pytest 用例目录（相对 source.path）
-python = "auto"        # 跑 pytest 的解释器；auto=自动探测
-timeout = 600          # 单次 pytest 整体超时（秒，必须 >0）
+dir = "tests"          # pytest case dir (relative to source.path)
+python = "auto"        # interpreter for pytest; auto=auto-detect
+timeout = 600          # per-pytest timeout (sec, must be >0)
 
 [coverage]
 tool = "gcov"
@@ -40,47 +42,47 @@ gcov_bin = "gcov"
 func_target = 100.0
 cond_target = 85.0
 
-[unittest]              # 可选：e2e 不可达函数转单测（gap 根因 N1/N3/N5）
-compiler = ""           # 单测编译器（空=跟随 build 体系；建议 gcc / g++）
-flags = ["-O0", "-g", "-Wall"]   # 单测编译附加 flag（会自动追加 --coverage）
-link_libs = []          # 额外链接库，如 ["-lm", "-lpthread"]
-obj_dir = ".aicoverage/ut"       # 单测中间产物目录（.gcno/.gcda 落此）
+[unittest]              # optional: E2E-unreachable -> unit test (gap causes N1/N3/N5)
+compiler = ""           # unit-test compiler (empty=follow build system; recommended gcc / g++)
+flags = ["-O0", "-g", "-Wall"]   # extra unit-test compile flags (--coverage auto-appended)
+link_libs = []          # extra link libs, e.g. ["-lm", "-lpthread"]
+obj_dir = ".aicoverage/ut"       # unit-test intermediate dir (.gcno/.gcda land here)
 
 [loop]
 max_iter = 6
 no_progress_stop = 2
 
 [llm]
-model = "your-model-name"  # 必填：所用 Agent SDK 支持的模型名
-gen_model = ""         # 留空 = 同 model
-max_turns = 120        # 单次 agent 调用最大工具轮次（复杂 C/C++ 项目 80 易 context_overflow）
-max_verify_retry = 3   # verify 失败修复回环最大次数（复杂项目 gen 修不完 2 次易假早停）
+model = "your-model-name"  # required: model name supported by the Agent SDK
+gen_model = ""         # empty = same as model
+max_turns = 120        # max tool turns per agent call (80 was too small for complex C/C++ projects)
+max_verify_retry = 3   # max verify fix-loop rounds (at 2 complex projects gen often fails in time)
 
-[knowledge]            # 全部可选
-kb_dir = ""            # 项目测试知识库（Markdown）
-badcase_dir = ""       # 已废弃：badcase 自动沉淀于 .aicoverage/badcases.md
+[knowledge]            # all optional
+kb_dir = ""            # project test knowledge base (Markdown)
+badcase_dir = ""       # deprecated: badcases auto-accumulate into .aicoverage/badcases.md
 few_shots_dir = ""
-prompts_dir = ""       # 整份覆盖内置 prompts/<agent>.md
+prompts_dir = ""       # fully override built-in prompts/<agent>.md
 
-[guard]                # 额外命令黑名单（正则，hooks 硬拦截）
+[guard]                # extra command blacklist (regex, hard-intercepted by hooks)
 blocked_commands = []
 
-[codegraph]             # 可选：MR 增量覆盖闭环用（调用链分析/diff 行归因）
+[codegraph]             # optional: MR incremental coverage loop (call-graph/diff attribution)
 enabled = false
-index_dir = ".codegraph"     # `codegraph init` 产物目录（相对 source.path）
-entrypoints = ["main"]        # 反向调用链 BFS 的入口锚点（裸函数名）；
-                              # 库类项目填驱动程序的 main，而非被测库导出函数
+index_dir = ".codegraph"     # `codegraph init` artifact dir (relative to source.path)
+entrypoints = ["main"]        # reverse call-graph BFS entry anchors (bare function names);
+                              # for library projects use the driver's main, not the lib's exports
 
-[scan]                  # 可选：MR 扫描轨后端
+[scan]                  # optional: MR scan-track backend
 backend = "auto"             # auto | ocr | agent | off
-                              # ocr: open-code-review（需已安装 ocr CLI 并配置 LLM，
-                              #      npm i -g @alibaba-group/open-code-review）
-                              # agent: 自研 scan-agent（纯本地 LLM 聚焦扫描）
-                              # auto: ocr 可用则用之，否则降级 agent
+                              # ocr: open-code-review (needs ocr CLI installed & LLM configured,
+                              #      npm i -g @alibaba-group/open-code-review)
+                              # agent: built-in scan-agent (pure local LLM focused scan)
+                              # auto: use ocr if available, else fall back to agent
 """
 
 CONFTEST_TEMPLATE = '''\
-"""AIcoverage 测试脚手架 conftest（可按项目需要扩展）。"""
+"""AIcoverage test scaffolding conftest (extendable per project)."""
 import os
 import sys
 from pathlib import Path
@@ -95,12 +97,12 @@ if str(TESTS_LIB) not in sys.path:
 
 @pytest.fixture(scope="session")
 def target() -> Path:
-    """被测插桩二进制路径。"""
+    """Path to the instrumented binary under test."""
     binary = os.environ.get("AICOV_BINARY", "")
     if binary:
         p = Path(binary)
     else:
-        # 回退：常见命名约定
+        # fallback: common naming conventions
         candidates = [SRC_ROOT / name for name in
                       ("wrk", "app", "main", "bin/app")]
         p = next((c for c in candidates if c.exists()), SRC_ROOT)
@@ -114,24 +116,25 @@ def src_root() -> Path:
     return SRC_ROOT
 '''
 
-HARNESS_TEMPLATE = r'''"""harness — 测试原子函数库（"原子函数 → 用例搭积木"的载体）。
+HARNESS_TEMPLATE = r'''"""harness -- test atomic-function library (the carrier of "atomic functions -> case building blocks").
 
-用例铁律：
-  用例体只做三件事：构造数据 → 调原子函数 → 把返回值传给断言原子函数。
-  需要新的验证维度/打印信息时，**先扩展本文件**，再让用例调用。
+Case iron rules:
+  A case body does only three things: construct data -> call an atomic function -> pass the
+  return value to an assertion atomic function.
+  For a new verification dimension/print info, **extend this file first**, then let cases call it.
 
-每个 test_* 函数的 docstring 必须含"描述"+"测试点"两个字段（供人工静态审查，
-不用跑 pytest 看日志就能看懂用例目的；由 aicoverage.docstyle 模块自动校验，
-EC-07）。docstring 内容示例（两个字段各占一行）：
+Every test_* function's docstring must contain the two fields 描述 + 测试点 (for manual
+static review -- understand the case purpose without running pytest/logs; auto-validated by
+the aicoverage.docstyle module, EC-07). Docstring example (one field per line):
 
-    描述：<一句话说明这个用例验证什么行为>
-    测试点：<对应源码位置 file:line 与具体分支，与下面 print_test_point_box
-            的 what 参数一致>
+    描述：<one sentence on what behavior this case verifies>
+    测试点：<corresponding source location file:line and branch, kept consistent with the
+            `what` arg of print_test_point_box below>
 
-执行可审计三要素（gen-agent 生成的用例必须遵守）：
-  1. print_test_point_box(...)  打印测试点（测什么/输入/预期）
-  2. manual_step(...)           打印关键步骤的 call/expected/observed（要打真实观测值）
-  3. assert_* 原子函数          打印 expected vs observed 再断言
+Three auditability elements (required for gen-agent-generated cases):
+  1. print_test_point_box(...)  print the test point (what/input/expected)
+  2. manual_step(...)           print key steps' call/expected/observed (real observed values)
+  3. assert_* atomic functions  print expected vs observed, then assert
 """
 from __future__ import annotations
 
@@ -150,7 +153,7 @@ from pathlib import Path
 SRC_ROOT = Path(os.environ.get("AICOV_SRC", Path(__file__).resolve().parents[2]))
 
 
-# ── 运行被测目标 ──────────────────────────────────────────────
+# ── Running the target ─────────────────────────────────────────
 
 @dataclass
 class ProcResult:
@@ -165,7 +168,7 @@ class ProcResult:
         return self.rc == 0
 
     def stdout_lines(self, pattern: str = "") -> list[str]:
-        """按可选正则过滤 stdout 行（只做数据提取，断言仍走 assert_*）。"""
+        """Filter stdout lines by an optional regex (data extraction only; assertions still go through assert_*)."""
         lines = self.stdout.splitlines()
         if pattern:
             rx = re.compile(pattern)
@@ -175,7 +178,7 @@ class ProcResult:
 
 def run_binary(args, *, stdin: str | None = None, timeout: int = 30,
                env_extra: dict | None = None, cwd: str | None = None) -> ProcResult:
-    """运行被测插桩二进制（路径取 AICOV_BINARY），返回 ProcResult。"""
+    """Run the instrumented binary under test (path from AICOV_BINARY), returning ProcResult."""
     binary = os.environ.get("AICOV_BINARY", "")
     if not binary:
         raise RuntimeError("环境变量 AICOV_BINARY 未设置（应由 aicov 执行器注入）")
@@ -193,13 +196,15 @@ def run_binary(args, *, stdin: str | None = None, timeout: int = 30,
                       duration_ms=int((time.time() - start) * 1000))
 
 
-# ── 单元测试通道（e2e 不可达函数转单测）─────────────────────────
-# 背景：某些函数无法通过被测二进制的正常 E2E 流程触达（错误处理路径 N3、
-#       静态初始化、平台特化 N1/N5 等）。此时可写一个 test_driver_*.c 直接
-#       调用目标函数，用 --coverage 插桩编译出单测二进制并运行，让 gcov 采集
-#       到该函数。因为 gcov 按源码树扫 .gcno/.gcda，这套通道与现有采集完全兼容。
+# ── Unit-test channel (E2E-unreachable -> unit test) ─────────────
+# Background: some functions cannot be reached through the binary's normal E2E flow
+# (error-handling paths N3, static init, platform-specific N1/N5, etc.). Here you can
+# write a test_driver_*.c that calls the target function directly, compile it into a
+# unit-test binary with --coverage and run it, so gcov collects that function. Since gcov
+# scans the source tree for .gcno/.gcda, this channel is fully compatible with existing
+# collection.
 
-# 常见链接库（undefined reference 时自动逐个尝试补齐，省去人工配置 link_libs）
+# Common link libs (auto-tried one by one on undefined reference, saving manual link_libs config)
 _COMMON_LINK_LIBS = ("-lm", "-lpthread", "-lrt", "-ldl", "-lz")
 
 
@@ -217,18 +222,19 @@ def compile_unit_driver(driver_c: Path | str, sources: list[Path | str],
                         out_name: str = "ut_main",
                         include_dirs: list[Path | str] | None = None,
                         *, timeout: int = 120) -> ProcResult:
-    """用 --coverage 插桩编译被测源文件 + driver，链接成单测二进制。
+    """Compile the target source files + driver with --coverage and link into a unit-test binary.
 
     Args:
-        driver_c: 测试 driver 源码路径（含 main，直接调用目标函数）。
-        sources: 被测源文件列表（目标函数所在 .c/.cc/.cpp）。这些文件必须已经
-            用 --coverage 插桩编译过（或本次用 -fprofile-arcs -ftest-coverage
-            一起编译）——本函数总是追加 --coverage，保证 .gcno 生成。
-        out_name: 输出二进制名（放 AICOV_UT_OBJ_DIR 下）。
-        include_dirs: 额外的头文件搜索目录（相对或绝对）。
+        driver_c: test driver source path (contains main, calls the target function directly).
+        sources: target source file list (.c/.cc/.cpp where the target functions live). These
+            must already be compiled with --coverage (or compiled here with
+            -fprofile-arcs -ftest-coverage) -- this function always appends --coverage so
+            .gcno is generated.
+        out_name: output binary name (placed under AICOV_UT_OBJ_DIR).
+        include_dirs: extra header search dirs (relative or absolute).
 
     Returns:
-        ProcResult（cmd=编译命令串；rc=0 且产物存在才算成功）。
+        ProcResult (cmd = compile command; rc=0 and the artifact existing count as success).
     """
     cc = os.environ.get("AICOV_UT_COMPILER", "gcc")
     flags = os.environ.get("AICOV_UT_FLAGS", "-O0 -g -Wall").split()
@@ -255,9 +261,9 @@ def compile_unit_driver(driver_c: Path | str, sources: list[Path | str],
     cmd = [*base_cmd, *link_libs]
     rc, log = _run_cc(cmd, timeout=timeout, cwd=str(SRC_ROOT))
 
-    # 链接失败自愈：stderr 出现 undefined reference（缺库）时，自动逐个尝试
-    # 常见库补齐（-lm/-lpthread/-lrt/-ldl/-lz），成功即用；全部失败则给出
-    # 明确提示，引导用户在 aicoverage.toml [unittest] link_libs 里补全。
+    # Link-failure self-healing: on "undefined reference" (missing library) in stderr, try
+    # common libraries one by one (-lm/-lpthread/-lrt/-ldl/-lz); use whichever succeeds; if
+    # all fail, give an explicit hint to fill [unittest] link_libs in aicoverage.toml.
     if rc != 0 and "undefined reference" in log:
         for lib in _COMMON_LINK_LIBS:
             if lib in link_libs:
@@ -284,10 +290,10 @@ def compile_unit_driver(driver_c: Path | str, sources: list[Path | str],
 
 def run_driver(out_name: str = "ut_main", args: list | None = None, *,
                timeout: int = 60, env_extra: dict | None = None) -> ProcResult:
-    """运行已编译的单测 driver 二进制（见 compile_unit_driver），返回 ProcResult。
+    """Run a compiled unit-test driver binary (see compile_unit_driver), returning ProcResult.
 
-    单测二进制必须由 compile_unit_driver 编译（落 AICOV_UT_OBJ_DIR）。运行后
-    会写 .gcda，gcov 采集即可命中对应目标函数。
+    The unit-test binary must be compiled by compile_unit_driver (lands under AICOV_UT_OBJ_DIR).
+    Running writes .gcda, so gcov collection can hit the target functions.
     """
     ut_dir = Path(os.environ.get("AICOV_UT_OBJ_DIR", SRC_ROOT / ".aicoverage" / "ut"))
     binary = ut_dir / out_name
@@ -305,9 +311,10 @@ def run_driver(out_name: str = "ut_main", args: list | None = None, *,
                               env=env, cwd=str(SRC_ROOT))
         rc = proc.returncode
         stderr = proc.stderr or ""
-        # 崩溃检测：rc 为负值 = 被信号终止（如 -11=SIGSEGV）。driver 直接调用
-        # 被测函数可能因野指针/越界崩溃，给出明确提示（是 driver 构造问题还是
-        # 被测函数真实缺陷，需结合 stderr 判断）。
+        # Crash detection: a negative rc means termination by a signal (e.g. -11=SIGSEGV).
+        # A driver directly calling the target function may crash on a dangling pointer /
+        # out-of-bounds; give an explicit hint (driver-construction bug vs real defect in the
+        # target function, judged with stderr).
         if rc < 0:
             sig = -rc
             sig_name = _SIGNAL_NAMES.get(sig, f"signal {sig}")
@@ -330,21 +337,21 @@ _SIGNAL_NAMES = {
 
 
 def assert_ut_compiled(res: ProcResult) -> None:
-    """断言单测 driver 编译成功（rc=0）。"""
+    """Assert the unit-test driver compiled successfully (rc=0)."""
     print(f"  assert_ut_compiled: rc={res.rc}")
     assert res.rc == 0, f"单测编译失败，编译输出:\n{res.stdout}"
 
 
 def assert_driver_ok(res: ProcResult) -> None:
-    """断言单测 driver 正常运行（rc=0 且未被信号终止）。崩溃（rc<0）时给出
-    明确区分提示，比裸断言退出码更可读。"""
+    """Assert the unit-test driver ran normally (rc=0, not signal-terminated). On crash (rc<0)
+    it gives a clear distinguishing hint, more readable than a bare exit-code assert."""
     print(f"  assert_driver_ok: rc={res.rc}")
     assert res.rc == 0, (
         f"单测 driver 未正常返回 0（rc={res.rc}）。stderr:\n{res.stderr}"
         if res.rc != 0 else "")
 
 
-# ── 本地测试服务（网络类用例一律自起回环服务，禁止连外网） ────
+# ── Local test service (network cases always self-start a loopback server; no external network) ──
 
 class _EchoHandler(BaseHTTPRequestHandler):
     delay = 0.0
@@ -359,15 +366,15 @@ class _EchoHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(self.body)
 
-    def log_message(self, *a):  # 静默访问日志
+    def log_message(self, *a):  # silence access logs
         pass
 
 
 def local_server(port: int = 0, *, delay: float = 0.0, status: int = 200,
                  body: bytes = b"ok") -> tuple[HTTPServer, str]:
-    """起一个本地回环 HTTP 服务，返回 (server, "127.0.0.1:port")。
+    """Start a local loopback HTTP service; returns (server, "127.0.0.1:port").
 
-    用例结束后应 server.shutdown()；建议配合 fixture 使用：
+    Call server.shutdown() after the case; recommended with a fixture:
         server, addr = local_server()
         yield addr
         server.shutdown()
@@ -379,16 +386,16 @@ def local_server(port: int = 0, *, delay: float = 0.0, status: int = 200,
 
 
 def free_port() -> int:
-    """获取一个空闲本地端口。"""
+    """Get an available local port."""
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
-# ── 输入构造 ─────────────────────────────────────────────────
+# ── Input construction ──────────────────────────────────────────
 
 def make_tmp_file(content: str, suffix: str = ".txt") -> Path:
-    """把内容写进临时文件，返回路径（会话结束后由系统清理）。"""
+    """Write content into a temp file; returns its path (cleaned up by the system after the session)."""
     f = tempfile.NamedTemporaryFile("w", suffix=suffix, delete=False,
                                     encoding="utf-8", dir=str(SRC_ROOT / ".aicoverage"))
     f.write(content)
@@ -396,10 +403,10 @@ def make_tmp_file(content: str, suffix: str = ".txt") -> Path:
     return Path(f.name)
 
 
-# ── 可审计打印 ───────────────────────────────────────────────
+# ── Auditable printing ───────────────────────────────────────────
 
 def print_test_point_box(what: str, input_desc: str, expected: str) -> None:
-    """打印测试点方框（测什么/输入/预期）。"""
+    """Print the test-point box (what/input/expected)."""
     line = "─" * 66
     print(f"\n┌{line}┐")
     for label, val in (("测什么", what), ("输入", input_desc), ("预期", expected)):
@@ -412,7 +419,7 @@ def print_test_point_box(what: str, input_desc: str, expected: str) -> None:
 
 def manual_step(name: str, *, call: str, side_effect: str, expected: str,
                 observed: str) -> None:
-    """打印一步关键操作的真实观测（observed 必须是真实输出，不能只打 True/False）。"""
+    """Print one key step's real observation (observed must be real output, not just True/False)."""
     print(f"  [step] {name}")
     print(f"         call:       {call}")
     print(f"         side_effect:{side_effect}")
@@ -420,7 +427,7 @@ def manual_step(name: str, *, call: str, side_effect: str, expected: str,
     print(f"         observed:   {observed}", flush=True)
 
 
-# ── 断言原子函数（打印 expected vs observed 再断言） ─────────
+# ── Assertion atomic functions (print expected vs observed, then assert) ──
 
 def assert_exit_code(res: ProcResult, expected: int) -> None:
     print(f"  assert_exit_code: expected={expected} observed={res.rc}")
@@ -470,7 +477,7 @@ def assert_duration_lt(res: ProcResult, seconds: float) -> None:
 
 def scaffold(source: Path, *, name: str, build_cmd: str, binary: str,
              language: str = "c") -> None:
-    """在目标项目生成配置 + tests/ harness 脚手架。"""
+    """Generate the config + tests/ harness scaffold in the target project."""
     config = CONFIG_TEMPLATE.format(name=name, language=language,
                                     build_cmd=build_cmd, binary=binary)
     (source / "aicoverage.toml").write_text(config, encoding="utf-8")
@@ -481,7 +488,7 @@ def scaffold(source: Path, *, name: str, build_cmd: str, binary: str,
     (tests / "lib" / "harness.py").write_text(HARNESS_TEMPLATE, encoding="utf-8")
     (tests / "lib" / "__init__.py").write_text("", encoding="utf-8")
 
-    # .aicoverage 工作区 + gitignore
+    # .aicoverage workspace + gitignore
     (source / ".aicoverage").mkdir(exist_ok=True)
     gi = source / ".gitignore"
     entry = ".aicoverage/\n*.gcda\n*.gcno\n*.gcov.json*\n"

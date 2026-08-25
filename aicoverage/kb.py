@@ -1,14 +1,16 @@
-"""代码知识库构建轨：kb-agent 生成 wiki/（wikirize 方法论适配）。
+"""Code knowledge-base build track: kb-agent generates wiki/ (wikirize methodology adapted).
 
-用户需求（2026-08-24）：在执行完整闭环（loop/mr）之前，可选择先根据代码
-构建知识库——后续 analyzer/coverage/gen/scan agent 通过 wiki 导航降低源码
-探索成本（wikirize 基准数据：agent 探索 -45.9% token / -28.8% 时间），
-这也直接缓解 ModSecurity 闭环观测到的 AGENT_CONTEXT_OVERFLOW 问题。
+User requirement (2026-08-24): before running a full loop (loop/mr), optionally build a
+knowledge base from the code first -- subsequent analyzer/coverage/gen/scan agents navigate
+the wiki to lower source-exploration cost (wikirize benchmark: agent exploration -45.9% token
+/ -28.8% time), which also directly alleviates the AGENT_CONTEXT_OVERFLOW observed in the
+ModSecurity loop.
 
-与 wikirize 原版 skill 的关系：方法论（7 阶段 / lookup-first 页面 / Source
-Truth Order / 必备页面清单）完整保留并注明来源；差异点是本实现由
-AIcoverage 的 kb-agent（CodeBuddy SDK 单 agent 顺序执行）承载，而非外部
-skill 生态（`npx skills add`）——保持 AIcoverage 自包含、零 node 依赖。
+Relation to the original wikirize skill: the methodology (7 stages / lookup-first pages /
+Source Truth Order / required-page list) is fully preserved with attribution; the difference
+is that this implementation is carried by AIcoverage's kb-agent (CodeBuddy SDK single-agent
+sequential execution) rather than the external skill ecosystem (`npx skills add`) -- keeping
+AIcoverage self-contained with zero node dependency.
 """
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ from .agent_call import call_agent
 from .config import ProjectConfig
 from .runner import AgentRunner
 
-#: 必备页面（Definition of Done 的最小集合；缺任一即视为构建不完整）
+#: Required pages (minimum Definition of Done set; missing any means an incomplete build)
 REQUIRED_PAGES = (
     "index.md",
     "agent-quickstart.md",
@@ -31,19 +33,19 @@ REQUIRED_PAGES = (
 
 
 def wiki_dir(cfg: ProjectConfig) -> Path:
-    """wiki 固定约定路径（wikirize 约定：<source>/wiki/）。"""
+    """wiki's fixed conventional path (wikirize convention: <source>/wiki/)."""
     return cfg.source_path / "wiki"
 
 
 def wiki_ready(cfg: ProjectConfig) -> bool:
-    """wiki 已构建且必备页面齐备。"""
+    """Whether the wiki is built and all required pages are present."""
     d = wiki_dir(cfg)
     return d.is_dir() and all((d / p).exists() for p in REQUIRED_PAGES)
 
 
 def wiki_navigation_hint(cfg: ProjectConfig) -> str:
-    """注入各 agent prompt 的 wiki 导航提示（省 token 的核心机制：
-    agent 先读地图再精读源码，而不是盲目 rglob 全仓库）。"""
+    """Wiki-navigation hint injected into each agent prompt (the core token-saving mechanism:
+    agents read the map first, then deep-read the source, instead of blindly rglob-ing the repo)."""
     if not wiki_ready(cfg):
         return ""
     return (
@@ -79,7 +81,7 @@ AGENTS.md：{cfg.source_path / 'AGENTS.md'}（追加 Project Wiki 章节，保�
 async def run_kb_build(
     cfg: ProjectConfig, *, quiet: bool = False, force: bool = False,
 ) -> dict:
-    """构建（或 --force 重建）项目 wiki。
+    """Build (or --force rebuild) the project wiki.
 
     Returns:
         {"status": "ok|skipped|incomplete", "pages": [...], "missing": [...]}
@@ -107,7 +109,7 @@ async def run_kb_build(
         runs_dir=cfg.runs_dir, stage="kb", max_retries=2,
     )
 
-    # 确定性产物校验（Definition of Done 的机器可查部分）
+    # Deterministic artifact verification (the machine-checkable part of Definition of Done)
     missing = [p for p in REQUIRED_PAGES if not (wiki_dir(cfg) / p).exists()]
     pages = sorted(
         p.relative_to(wiki_dir(cfg)).as_posix()

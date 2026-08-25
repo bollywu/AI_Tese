@@ -1,19 +1,19 @@
-"""CodeGraph CLI 封装：调用链反向 BFS + 行区间函数归因 + 调用链聚类分批。
+"""CodeGraph CLI wrapper: reverse-BFS call-chain + line-range function attribution + call-chain cluster batching.
 
-调用链分析能力基于真实项目数据验证过的实现，做了以下
-通用化改造：
-1. 入口锚点（entrypoints）为项目可配置列表（`aicoverage.toml` 的
-   `[codegraph].entrypoints`），而非硬编码特定入口函数。
-2. 不假设任何特定项目的函数指针间接调用模式——纯 CodeGraph AST 调用边
-   已是"直接调用"的精确来源。若目标项目存在函数指针表/命令注册表等
-   间接分发模式，可后续在 `aicoverage.toml` 里加桥接规则扩展点（YAGNI，
-   暂不预先设计）。
+The call-chain analysis capability is validated on real project data, with these
+generalization changes:
+1. Entry anchors (entrypoints) are a project-configurable list (`[codegraph].entrypoints`
+   in aicoverage.toml), not hard-coded specific entry functions.
+2. It assumes no specific project's function-pointer indirect-call pattern -- pure CodeGraph
+   AST call edges are already the precise source of "direct calls". If the target project has
+   indirect dispatch patterns such as function-pointer tables / command registries, a bridge
+   rule extension point can be added later in aicoverage.toml (YAGNI; not pre-designed now).
 
-真实 codegraph CLI 行为已用最小 C 项目验证（2026-08-24）：
-- sqlite `nodes` 表字段：id/kind/name/qualified_name/file_path/start_line/
-  end_line/signature 等，与本模块假设一致。
-- `codegraph callers <symbol> --json` 返回 `{"callers": [{"name","kind",
-  "filePath","startLine"}, ...]}`。
+Real codegraph CLI behavior verified on a minimal C project (2026-08-24):
+- sqlite `nodes` table fields: id/kind/name/qualified_name/file_path/start_line/
+  end_line/signature etc., consistent with this module's assumptions.
+- `codegraph callers <symbol> --json` returns `{"callers": [{"name","kind",
+  "filePath","startLine"}, ...]}`.
 """
 from __future__ import annotations
 
@@ -28,10 +28,10 @@ from pathlib import Path
 
 
 class CodeGraphNotAvailable(RuntimeError):
-    """CodeGraph CLI 不可用（未安装 / 索引未建立）。"""
+    """CodeGraph CLI unavailable (not installed / index not built)."""
 
 
-# ── CLI 子进程封装 ─────────────────────────────────────────────
+# ── CLI subprocess wrapper ───────────────────────────────────────
 
 def _resolve_binary() -> str:
     configured = os.environ.get("CODEGRAPH_BIN", "").strip()
@@ -70,16 +70,17 @@ def _db_path(source_path: Path, index_dir: str = ".codegraph") -> Path:
 
 
 def is_indexed(source_path: Path, index_dir: str = ".codegraph") -> bool:
-    """判断 source_path 下是否已建立 CodeGraph 索引。"""
+    """Whether a CodeGraph index already exists under source_path."""
     return _db_path(source_path, index_dir).exists()
 
 
 def ensure_index(source_path: Path, *, force: bool = False, timeout: int = 600) -> dict:
-    """确保已建索引：未建立则 `codegraph init`，已建立则 `codegraph sync`（增量更新）。
+    """Ensure an index exists: `codegraph init` if missing, else `codegraph sync` (incremental update).
 
-    不在库内自动调用——由调用方（CLI 层）显式触发，避免用户在不知情的情况下
-    等一个耗时未知的全量索引过程（对齐计划文档 Q2：默认报错提示手动执行，
-    需要自动建索引的场景用本函数显式调用）。
+    Not auto-invoked inside the library -- triggered explicitly by the caller (CLI layer) to
+    avoid making the user wait through an unknown-duration full indexing without knowing it
+    (aligned with design doc Q2: default error-hint to run manually; use this function for
+    explicit auto-indexing scenarios).
     """
     binary = _resolve_binary()
     if is_indexed(source_path) and not force:
@@ -100,7 +101,7 @@ def ensure_index(source_path: Path, *, force: bool = False, timeout: int = 600) 
 
 
 def index_sha(source_path: Path, index_dir: str = ".codegraph") -> str:
-    """索引指纹（mtime+size，检测索引是否滞后于源码，不做全量哈希）。"""
+    """Index fingerprint (mtime+size, detects whether the index lags the source; no full hash)."""
     db = _db_path(source_path, index_dir)
     if not db.exists():
         return ""
@@ -117,7 +118,7 @@ class CGSymbolRef:
 
 
 def callers(source_path: Path, symbol: str, limit: int = 50) -> list[CGSymbolRef]:
-    """查询谁调用了 symbol（AST 引用消解，非文本正则匹配）。"""
+    """Query who calls `symbol` (AST reference resolution, not text regex matching)."""
     data = _run_json(["callers", symbol, "--limit", str(limit)], cwd=source_path)
     return [
         CGSymbolRef(name=c.get("name", ""), kind=c.get("kind", ""),
@@ -127,7 +128,7 @@ def callers(source_path: Path, symbol: str, limit: int = 50) -> list[CGSymbolRef
 
 
 def callees(source_path: Path, symbol: str, limit: int = 50) -> list[CGSymbolRef]:
-    """查询 symbol 调用了谁。"""
+    """Query whom `symbol` calls."""
     data = _run_json(["callees", symbol, "--limit", str(limit)], cwd=source_path)
     return [
         CGSymbolRef(name=c.get("name", ""), kind=c.get("kind", ""),
@@ -136,11 +137,11 @@ def callees(source_path: Path, symbol: str, limit: int = 50) -> list[CGSymbolRef
     ]
 
 
-# ── 行区间反查（diff 归因的核心，M1 关键能力）───────────────────
+# ── Line-range reverse lookup (the core of diff attribution, M1 key capability) ──
 
 @dataclass
 class CGFunctionRange:
-    """函数的行区间 + 限定名（diff 行号 → 函数的确定性反查结果）。"""
+    """A function's line range + qualified name (the deterministic reverse-lookup of diff line -> function)."""
 
     name: str
     qualified_name: str
@@ -155,21 +156,22 @@ def functions_covering_lines(
     source_path: Path, file_path: str, lines: list[int],
     *, index_dir: str = ".codegraph", innermost_only: bool = True,
 ) -> list[CGFunctionRange]:
-    """反查：给定文件的若干改动行，返回行区间命中的函数（带限定名）。
+    """Reverse lookup: for several changed lines of a file, return the functions (qualified)
+    whose line ranges cover them.
 
     Args:
-        innermost_only: True（默认）时每个改动行只取区间最小（最内层）的函数。
-            ⚠️ 必需——CodeGraph 对某些语言/写法的作用域推断会产生嵌套区间
-            （如外层匿名包裹范围 + 内层真实宿主函数同时覆盖同一行），已在
-            真实项目实测中验证过这个陷阱
-            （案例：外层函数区间 [342-1574] 与内层真实宿主 [1230-1366] 都命中
-            第 1235 行，若都返回会把同一处改动拆成两个目标）。取最内层
-            （区间跨度最小）才是改动真正所属的函数。
+        innermost_only: True (default) keeps only the smallest (innermost) function for each
+            changed line. ⚠️ Required -- CodeGraph's scope inference for some languages/styles
+            yields nested ranges (e.g. an outer anonymous wrapper plus the inner real host
+            function both cover the same line); this trap was verified in real-project testing
+            (case: outer [342-1574] and inner real host [1230-1366] both hit line 1235; returning
+            both would split one change into two targets). The innermost (smallest span) is the
+            function the change truly belongs to.
 
     Returns:
-        命中的函数列表（按 start_line 排序、去重）。空列表表示这些改动行
-        不落在任何已索引函数体内（全局变量/宏/注释/类声明区），调用方应
-        据此判定为 unresolved，**不得回退到猜测**。
+        The list of hit functions (sorted by start_line, deduped). An empty list means these
+        changed lines fall in no indexed function body (globals/macros/comments/class-decl
+        regions); the caller should treat that as unresolved and **must not fall back to guessing**.
     """
     if not lines:
         return []
@@ -224,7 +226,7 @@ def functions_covering_lines(
 def list_functions_in_file(
     source_path: Path, file_path: str, *, index_dir: str = ".codegraph",
 ) -> list[CGSymbolRef]:
-    """枚举某文件下的全部函数/方法（用于 `func_name="*"` 文件级展开场景）。"""
+    """Enumerate all functions/methods in a file (for `func_name="*"` file-level expansion)."""
     db_path = _db_path(source_path, index_dir)
     if not db_path.exists():
         raise CodeGraphNotAvailable(
@@ -251,12 +253,13 @@ def list_functions_in_file(
         conn.close()
 
 
-# ── 反向 BFS：调用链追溯到入口锚点 ───────────────────────────────
+# ── Reverse BFS: trace the call chain back to entry anchors ───────
 
 @dataclass
 class CallPath:
     entry: str
     path: list[str]           # [entry, ..., target]
+
 
     def render(self) -> str:
         return " → ".join(self.path)
@@ -275,8 +278,9 @@ def _bare_name(qualified: str) -> str:
 
 
 def _load_reverse_call_graph(source_path: Path, index_dir: str = ".codegraph") -> dict[str, list[str]]:
-    """一次性从 CodeGraph sqlite 读取全量反向调用边到内存（一次 sqlite 扫描，
-    避免逐函数启动 codegraph 子进程——真实项目实测 244 函数从 ~20min 降到 <5s）。"""
+    """Load all reverse call edges from the CodeGraph sqlite into memory in one pass (one sqlite
+    scan, avoiding per-function codegraph subprocess -- real-project test: 244 functions went
+    from ~20min to <5s)."""
     db_path = _db_path(source_path, index_dir)
     if not db_path.exists():
         raise CodeGraphNotAvailable(
@@ -308,20 +312,21 @@ def trace_to_entrypoints(
     *, index_dir: str = ".codegraph", max_paths: int = 3, max_depth: int = 12,
     reverse_graph: dict[str, list[str]] | None = None,
 ) -> TraceResult:
-    """反向 BFS：从 target 出发沿"谁调用了我"方向找配置的入口锚点。
+    """Reverse BFS: from target, walk the "who calls me" direction to find the configured entry anchors.
 
     Args:
-        entrypoints: 项目配置的入口函数裸名列表（`aicoverage.toml` 的
-            `[codegraph].entrypoints`，通常是 `main`；库类项目填驱动程序的
-            入口，而非被测库本身的导出函数）。
-        reverse_graph: 预加载的反向调用图（批量查询时传入，避免重复扫描
-            sqlite；见 `trace_batch_to_entrypoints`）。
+        entrypoints: project-configured entry-function bare-name list (`[codegraph].entrypoints`
+            in aicoverage.toml; usually `main`; library projects fill the driver's entry, not
+            the lib's own exported functions).
+        reverse_graph: pre-loaded reverse call graph (pass when batch querying to avoid
+            re-scanning sqlite; see `trace_batch_to_entrypoints`).
 
     Returns:
-        TraceResult。查不到路径**不代表函数不存在**——`resolved=False` 才是
-        "函数名在索引里完全找不到"；`resolved=True, found=False` 是"函数存在
-        但没有任何调用链能到达配置的入口"，强烈提示疑似死代码/新增未接线的
-        函数，调用方不应为其生成 E2E 用例。
+        TraceResult. Not finding a path does **not** mean the function doesn't exist --
+        `resolved=False` means "the function name isn't in the index at all";
+        `resolved=True, found=False` means "the function exists but no call chain reaches the
+        configured entry", strongly suggesting dead code / a newly-added un-wired function;
+        the caller should not generate E2E cases for it.
     """
     target = target.strip()
     if not target:
@@ -352,7 +357,7 @@ def trace_to_entrypoints(
             for caller_name in rg.get(node_bare, []):
                 caller_bare = _bare_name(caller_name)
                 if caller_name in path or caller_bare in [_bare_name(p) for p in path]:
-                    continue  # 防环
+                    continue  # cycle guard
                 new_path = [caller_name] + path
                 if caller_bare in entry_set:
                     found_paths.append(CallPath(entry=caller_name, path=new_path))
@@ -372,7 +377,7 @@ def trace_batch_to_entrypoints(
     source_path: Path, targets: list[str], entrypoints: list[str],
     *, index_dir: str = ".codegraph", max_paths: int = 1, max_depth: int = 12,
 ) -> dict[str, TraceResult]:
-    """批量反向 BFS：只扫一次 sqlite，逐个 target 复用内存中的反向图。"""
+    """Batch reverse BFS: scan sqlite once, reuse the in-memory reverse graph per target."""
     rg = _load_reverse_call_graph(source_path, index_dir)
     results: dict[str, TraceResult] = {}
     for target in targets:
@@ -386,10 +391,10 @@ def trace_batch_to_entrypoints(
     return results
 
 
-# ── 调用链聚类分批 ───────────────────────────────────────────────
+# ── Call-chain cluster batching ──────────────────────────────────
 
 def group_by_file(changed: list[tuple[str, str]]) -> list[list[tuple[str, str]]]:
-    """按文件分组：同一文件的全部变更函数放同一批（最简单、语义最直观）。"""
+    """Group by file: all changed functions of the same file go in one batch (simplest, most intuitive)."""
     by_file: dict[str, list[tuple[str, str]]] = {}
     for f, fn in changed:
         by_file.setdefault(f, []).append((f, fn))
@@ -397,7 +402,7 @@ def group_by_file(changed: list[tuple[str, str]]) -> list[list[tuple[str, str]]]
 
 
 def group_by_size(changed: list[tuple[str, str]], batch_size: int = 5) -> list[list[tuple[str, str]]]:
-    """固定数量切分（不考虑语义关联，简单兜底）。"""
+    """Split by fixed count (ignores semantic association; simple fallback)."""
     return [changed[i:i + batch_size] for i in range(0, len(changed), batch_size)]
 
 
@@ -405,13 +410,15 @@ def group_by_call_chain(
     source_path: Path, changed: list[tuple[str, str]], entrypoints: list[str],
     *, index_dir: str = ".codegraph",
 ) -> tuple[list[list[tuple[str, str]]], list[tuple[str, str]]]:
-    """按调用链路聚类：反向查询每个函数到入口的路径，同一入口下"距入口第二近
-    的节点"相同的函数聚成一批（同一条链路/同一个具体分发点进来的改动天然
-    关联，gen-agent 一次读懂调用链就能给整批函数写好触发条件）。
+    """Cluster by call chain: reverse-query each function's path to the entry; functions whose
+    "second-closest-to-entry node" under the same entry are the same cluster into one batch
+    (changes entering via the same chain / same concrete dispatch point are naturally related,
+    so gen-agent can read one call chain and write trigger conditions for the whole batch).
 
     Returns:
         (batches, unreachable)
-        unreachable: 查不到入口路径的函数（疑似死代码，人工复核，不自动生成用例）。
+        unreachable: functions with no entry path found (likely dead code; manual review, no
+        auto-generated cases).
     """
     targets = [fn for _, fn in changed]
     trace_results = trace_batch_to_entrypoints(source_path, targets, entrypoints, index_dir=index_dir)
@@ -435,14 +442,14 @@ def split_batches(
     batch_size: int = 5, source_path: Path | None = None,
     entrypoints: list[str] | None = None, index_dir: str = ".codegraph",
 ) -> tuple[list[list[tuple[str, str]]], list[tuple[str, str]]]:
-    """统一入口：按策略切分变更函数批次。
+    """Unified entry: split changed functions into batches by strategy.
 
     Args:
         strategy: file | chain | size
-        entrypoints: strategy=chain 时必须提供（非空列表）
+        entrypoints: required for strategy=chain (non-empty list)
 
     Returns:
-        (batches, unreachable)；unreachable 只在 strategy=chain 时可能非空。
+        (batches, unreachable); unreachable is only possibly non-empty for strategy=chain.
     """
     if not changed:
         return [], []

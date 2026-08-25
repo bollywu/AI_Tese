@@ -1,25 +1,27 @@
-"""badcase 自回归沉淀（双向闭环，业界 badcase 知识库的"自愈"实践）。
+"""badcase self-regressing accumulation (a two-way loop; the industry's "self-healing"
+badcase knowledge base practice).
 
-- **读侧（回归）**：`badcase_hint()` 把 badcase 库速查索引注入 gen prompt——
-  agent 生成用例前先看已知坑，防重复踩踏。
-- **写侧（沉淀）**：quality-agent 在 quality_report.json 里**提议**
-  `badcase_candidates` → `merge_candidates()` 用**确定性 Python 代码**校验
-  格式、查重、分配编号后落盘。LLM 只提议、代码裁决写入——不让 LLM 直接
-  写库（防格式崩坏与重复写入），符合 AIcoverage"确定性优先"哲学。
+- **Read side (regression)**: `badcase_hint()` injects a badcase quick-index into the gen
+  prompt -- agents check known pitfalls before generating cases, avoiding re-stepping on them.
+- **Write side (accumulation)**: quality-agent **proposes** `badcase_candidates` in
+  quality_report.json -> `merge_candidates()` validates format, dedups, and assigns IDs via
+  **deterministic Python code**, then persists. The LLM only proposes; code adjudicates writes
+  -- the LLM is not allowed to write the library directly (prevents format corruption and
+  duplicate writes), consistent with AIcoverage's "determinism-first" philosophy.
 
-双层库：
-- 工具级：`aicoverage/badcases/BASE.md`（随 AIcoverage 分发，跨项目通用坑，
-  种子内容来自 2026-08 真实事故复盘；只读，不由闭环改写）
-- 项目级：`<source>/.aicoverage/badcases.md`（每项目自动累积，闭环可写）
+Two-layer library:
+- Tool-level: `aicoverage/badcases/BASE.md` (ships with AIcoverage; cross-project common
+  pitfalls; seed content from 2026-08 real-incident postmortems; read-only, not rewritten by the loop)
+- Project-level: `<source>/.aicoverage/badcases.md` (auto-accumulates per project; the loop can write)
 
-条目格式（编号前缀 AICB）：
+Entry format (ID prefix AICB):
 
-    ## AICB-NNN: 标题
+    ## AICB-NNN: title
     - **类别**: <category>
     - **症状**: <symptom>
     - **根因**: <root_cause>
     - **修复/预防**: <prevention>
-    - **影响**: <affects>（哪个 agent/阶段）
+    - **影响**: <affects> (which agent/stage)
 """
 from __future__ import annotations
 
@@ -30,10 +32,11 @@ from pathlib import Path
 
 _BASE_PATH = Path(__file__).parent / "badcases" / "BASE.md"
 
-#: 注入 prompt 的最大条目数（防止大库撑爆上下文；索引表始终全量）
+#: Max entries injected into the prompt (keeps a large library from blowing up the context;
+#: the index table is always full)
 _HINT_MAX_DETAILS = 12
 
-#: quality-agent 提议条目的必填字段（缺失即拒绝合并，绝不含糊入库）
+#: Required fields of quality-agent-proposed entries (missing any -> reject; never enter ambiguously)
 _REQUIRED_FIELDS = ("title", "category", "symptom", "root_cause", "prevention")
 
 
@@ -46,18 +49,18 @@ class BadcaseEntry:
     root_cause: str = ""
     prevention: str = ""
     affects: str = ""
-    # 详情原文（含字段外的补充行），用于去重比较
+    # raw detail text (incl. non-field extra lines), used for dedup comparison
     raw: str = field(default="", repr=False)
 
 
-# ── 解析 ────────────────────────────────────────────────────────
+# ── Parsing ───────────────────────────────────────────────────────
 
 _ENTRY_RE = re.compile(r"^## (AICB-\d+):\s*(.+)$", re.MULTILINE)
 
 
 def parse_badcases(path: Path) -> list[BadcaseEntry]:
-    """解析 badcase 库 Markdown → 条目列表。文件不存在/格式异常返回 []（读侧
-    fail-soft：坏库不应阻断闭环，只是提示降级）。"""
+    """Parse the badcase-library Markdown -> entry list. Missing/format-broken file returns
+    [] (read-side fail-soft: a broken library must not block the loop, only hint to degrade)."""
     if not path.exists():
         return []
     try:
@@ -83,24 +86,24 @@ def parse_badcases(path: Path) -> list[BadcaseEntry]:
 
 
 def project_badcases_path(workspace: Path) -> Path:
-    """项目级 badcase 库固定路径（<source>/.aicoverage/badcases.md）。"""
+    """Project-level badcase library's fixed path (<source>/.aicoverage/badcases.md)."""
     return workspace / "badcases.md"
 
 
 def _load_by_workspace(workspace: Path) -> list[BadcaseEntry]:
-    """合并 工具级 BASE + 项目级 条目（工具级在前）。"""
+    """Merge tool-level BASE + project-level entries (tool-level first)."""
     return parse_badcases(_BASE_PATH) + parse_badcases(project_badcases_path(workspace))
 
 
 def load_all(cfg) -> list[BadcaseEntry]:
-    """读侧统一入口（cfg: ProjectConfig）。"""
+    """Read-side unified entry (cfg: ProjectConfig)."""
     return _load_by_workspace(cfg.workspace)
 
 
-# ── 读侧：prompt 注入提示 ─────────────────────────────────────────
+# ── Read side: prompt-injection hint ────────────────────────────────
 
 def badcase_hint(cfg) -> str:
-    """注入 gen prompt 的 badcase 提示（读侧核心）。无库时返回空串。"""
+    """The badcase hint injected into the gen prompt (the read-side core). Returns "" when no library."""
     entries = load_all(cfg)
     if not entries:
         return ""
@@ -123,22 +126,22 @@ def badcase_hint(cfg) -> str:
     return "\n".join(lines) + "\n"
 
 
-# ── 写侧：确定性合并（LLM 提议、代码裁决）─────────────────────────
+# ── Write side: deterministic merge (LLM proposes, code adjudicates) ──
 
 def _normalize(s: str) -> str:
-    """查重用归一化：去空白/标点、小写。"""
+    """Dedup normalization: strip whitespace/punctuation, lowercase."""
     return re.sub(r"[\s\W]+", "", (s or "")).lower()
 
 
 def merge_candidates(workspace: Path, candidates: list[dict], *,
                      source: str = "quality-agent") -> dict:
-    """把 quality-agent 提议的 badcase_candidates 合并进项目级库。
+    """Merge quality-agent-proposed badcase_candidates into the project-level library.
 
-    确定性规则（每条独立裁决，坏条目不阻断好条目）：
-    1. 格式校验：必填字段（title/category/symptom/root_cause/prevention）缺一即拒
-    2. 查重：与现有条目（BASE+项目级）标题归一化相同 → 跳过
-    3. 编号：跨库最大号 +1 自增分配 AICB-NNN（避免与 BASE 撞号）
-    4. 落盘：追加到 `<workspace>/badcases.md`（首次创建带文件头与索引表）
+    Deterministic rules (each entry adjudicated independently; a bad entry never blocks a good one):
+    1. Format check: required fields (title/category/symptom/root_cause/prevention) -- reject if any missing
+    2. Dedup: skip if normalized title equals an existing entry (BASE + project-level)
+    3. ID: auto-increment the cross-library max +1 to assign AICB-NNN (avoids colliding with BASE)
+    4. Persist: append to `<workspace>/badcases.md` (first creation adds a file header and index table)
 
     Returns:
         {"merged": [{id,title,category}...], "rejected": [...], "path": str}

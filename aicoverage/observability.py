@@ -1,10 +1,11 @@
-"""可观测性事件发射器（通用化）。
+"""Observability event emitter (generalized).
 
-事件写入 <source>/.aicoverage/runs/<run_id>/events.jsonl（append + flock）。
-确定性代码在每个状态机节点自动发事件，不依赖 LLM 记得发——这是"确定性驱动"
-相对"LLM 驱动"的天然优势（经实战验证的设计）。
+Events are written to <source>/.aicoverage/runs/<run_id>/events.jsonl (append + flock).
+Deterministic code emits events automatically at each state-machine node, without
+relying on the LLM to remember -- this is the natural advantage of "deterministic
+drive" over "LLM drive" (a design validated in production).
 
-ROOT 从 ProjectConfig 读取（每个目标项目自己的 .aicoverage/ 目录），无全局单例。
+ROOT is read from ProjectConfig (each target project's own .aicoverage/ dir); no global singleton.
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ VALID_EVENT_TYPES = {
     "loop.start", "loop.exit", "loop.threshold_met", "loop.early_stop", "loop.error",
     # stage
     "stage.enter", "stage.exit", "stage.timeout",
-    # task（LLM agent 调用）
+    # task (LLM agent call)
     "task.call", "task.return", "task.retry", "task.backoff",
     "hallucination.detected", "context.compact",
     # artifact / coverage / execute
@@ -31,13 +32,13 @@ VALID_EVENT_TYPES = {
     "execute.completed",
     # build
     "build.ok", "build.fail",
-    # 诊断与恢复
+    # diagnostics & recovery
     "diagnostic", "recovery.attempt", "recovery.action", "recovery.result",
-    # 其它
+    # others
     "warn", "error", "custom",
 }
 
-# 稳定诊断码表（消费方按 code 判定，不解析 message 文案）
+# Stable diagnostic code table (consumers decide by code, not by parsing message text)
 DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
     "AGENT_HALLUCINATION":  {"severity": "medium", "title": "子 agent 幻觉检测（tool_uses=0 触发重试）"},
     "AGENT_FAILED":         {"severity": "high",   "title": "子 agent 调用失败（含重试耗尽）"},
@@ -57,7 +58,7 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
     "EARLY_STOP":           {"severity": "low",    "title": "闭环早停"},
 }
 
-# 观测静默开关（单测防污染生产 runs/ 目录）
+# Observation silence switch (unit tests avoid polluting production runs/ dir)
 _SILENT_ENV = "AICOV_OBS_SILENT"
 
 
@@ -99,7 +100,7 @@ def emit_recovery(phase: str, run_id: str, *, action: str | None = None,
 def _events_path(run_id: str, runs_dir: Path | None) -> Path:
     if runs_dir is not None:
         return runs_dir / run_id / "events.jsonl"
-    # 兜底：source 目录约定（与 state.py 共用 runs_dir 传入，一般不会走到这里）
+    # fallback: source-dir convention (runs_dir is passed like state.py; normally not reached)
     from .config import find_config
     cfg_path = find_config()
     src = cfg_path.parent
@@ -109,7 +110,7 @@ def _events_path(run_id: str, runs_dir: Path | None) -> Path:
 def emit(event_type: str, run_id: str, *, iter_n: int | None = None,
          stage: str | None = None, agent: str | None = None,
          data: dict[str, Any] | None = None, runs_dir: Path | None = None) -> dict[str, Any]:
-    """发射一条事件。未知类型不抛异常（可观测性不能成为闭环单点故障）。"""
+    """Emit one event. Unknown types do not raise (observability must not be the loop's single point of failure)."""
     if event_type not in VALID_EVENT_TYPES:
         print(f"    [observability] 未知事件类型: {event_type!r}（仍写入，不阻断流程）")
 
@@ -152,7 +153,7 @@ def emit(event_type: str, run_id: str, *, iter_n: int | None = None,
 
 
 def prompt_anchor(prompt: str) -> dict[str, Any]:
-    """prompt 内容锚点（sha256 + 长度）——model-visible ⟺ logged 不变式。"""
+    """Prompt content anchor (sha256 + length) -- the model-visible ⟺ logged invariant."""
     return {
         "sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         "length": len(prompt),

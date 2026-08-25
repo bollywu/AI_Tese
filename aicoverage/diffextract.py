@@ -1,17 +1,19 @@
-"""变更行 → 变更函数：CodeGraph 行区间反查归因（改造计划文档 §3.2）。
+"""Changed lines -> changed functions: CodeGraph line-range reverse-lookup attribution (design doc §3.2).
 
-设计经真实项目验证。核心原则：**函数名是从行号反查出来的结果，不是 diff 的
-直接输出**——不相信 `git diff` hunk header 的函数名提示（它可能对应上一个
-函数、可能丢类限定名），只用它做事后交叉校验。
+Design validated on a real project. Core principle: **the function name is the result of a
+reverse lookup from line numbers, not a direct diff output** -- it does not trust `git diff`
+hunk-header function-name hints (which may refer to the previous function or drop the class
+qualification); they are only used for post-hoc cross-validation.
 
-三种 resolution：
-- codegraph_range：CodeGraph 行区间命中且与 hunk header 提示一致（或无提示）
-- conflict：CodeGraph 结果与 hunk header 提示完全对不上，两者至少一个错——
-  不入闭环门禁分母，转人工复核
-- （无法归因的文件进 `unresolved_files`，同样不猜测）
+Three resolutions:
+- codegraph_range: CodeGraph line-range hit and consistent with the hunk-header hint (or no hint)
+- conflict: CodeGraph result and the hunk-header hint completely disagree; at least one is wrong
+  -- excluded from the loop-gate denominator, forwarded to manual review
+- (files that can't be attributed go to `unresolved_files`, likewise not guessed)
 
-刻意不做"CodeGraph 索引缺失时退化到正则"——退化等于放弃本模块的全部价值。
-索引缺失时直接抛 `CodeGraphNotAvailable`，让调用方去建索引。
+Deliberately no "fall back to regex when the CodeGraph index is missing" -- falling back would
+give up this module's entire value. When the index is missing it raises `CodeGraphNotAvailable`
+so the caller can build the index.
 """
 from __future__ import annotations
 
@@ -28,7 +30,7 @@ RESOLUTION_CONFLICT = "conflict"
 
 @dataclass
 class ChangedFunction:
-    """一个变更函数及其归因可信度。"""
+    """A changed function and its attribution trustworthiness."""
 
     file: str
     qualified_name: str
@@ -42,12 +44,12 @@ class ChangedFunction:
 
     @property
     def key(self) -> tuple[str, str]:
-        """(file, qualified_name)——绝不 split("::")，限定名原样保留。"""
+        """(file, qualified_name) -- never split("::"); the qualified name is kept as-is."""
         return (self.file, self.qualified_name)
 
     def as_target(self) -> tuple[str, str]:
-        """转成 (file, bare_name) 形态，供覆盖率/分批链路使用（现有覆盖率
-        产物存的是裸函数名，qualified_name 只用于人工审阅/去重 key）。"""
+        """Convert to (file, bare_name) form for the coverage/batching chain (existing coverage
+        artifacts store bare names; qualified_name is only for manual review/dedup key)."""
         return (self.file, self.bare_name)
 
     def to_dict(self) -> dict[str, Any]:
@@ -62,7 +64,7 @@ class ChangedFunction:
 
 @dataclass
 class DiffExtraction:
-    """一次 diff 提取的完整结果。"""
+    """The complete result of one diff extraction."""
 
     base_ref: str
     head_ref: str
@@ -97,7 +99,7 @@ class DiffExtraction:
 
 
 def _hint_bare_names(hints: list[str]) -> set[str]:
-    """从 hunk header 上下文抽出可能的函数名（仅用于交叉校验，不作为结果）。"""
+    """Extract candidate function names from hunk-header context (cross-validation only, not a result)."""
     out: set[str] = set()
     for h in hints:
         paren = h.find("(")
@@ -116,16 +118,16 @@ def extract(
     source_path: Path, base_ref: str, head_ref: str, *,
     include_globs: list[str] | None = None, index_dir: str = ".codegraph",
 ) -> DiffExtraction:
-    """确定性提取变更函数。
+    """Deterministically extract changed functions.
 
-    流程：
-      1. `git diff -U0` → 每文件改动行号（mrdiff.collect_file_diffs）
-      2. CodeGraph 行区间反查 → 带限定名的函数
-      3. hunk header 交叉校验：结果与提示完全对不上 → 标记 conflict
-      4. 改动行不落在任何已索引函数内的文件 → unresolved_files
+    Flow:
+     1. `git diff -U0` -> per-file changed line numbers (mrdiff.collect_file_diffs)
+     2. CodeGraph line-range reverse lookup -> qualified functions
+     3. hunk-header cross-validation: results completely disagree with hints -> mark conflict
+     4. files whose changed lines fall in no indexed function -> unresolved_files
 
     Raises:
-        callgraph.CodeGraphNotAvailable: 索引不存在。
+        callgraph.CodeGraphNotAvailable: index missing.
     """
     file_diffs, diff_text = collect_file_diffs(
         source_path, base_ref, head_ref, include_globs=include_globs)

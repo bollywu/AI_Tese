@@ -1,12 +1,14 @@
-"""diff 获取：本地 git 通道（完全本地，零外部平台依赖）。
+"""diff fetching: local git channel (fully local, zero external-platform dependency).
 
-只做"提取改了哪些文件的哪些行"这一件事——**不猜函数名**。函数归因是
-`diffextract.py` 的职责，靠 CodeGraph 行区间反查完成，这里只产出最小可信
-形态：`FileDiff(file, changed_lines, hunk_hints)`。
+Only does one thing -- "extract which lines of which files changed"; it does **not guess
+function names**. Function attribution is `diffextract.py`'s job, done via CodeGraph
+line-range reverse-lookup; this module only produces a minimal-trust form:
+`FileDiff(file, changed_lines, hunk_hints)`.
 
-`hunk_hints` 保留 hunk header 里出现的函数签名文本，仅供 `diffextract.py`
-做"交叉校验"用（CodeGraph 结果与 hunk header 完全对不上时，说明至少一方
-不可信，应降级为 conflict 而不是各信一半）——绝不用它直接当函数名结果。
+`hunk_hints` keeps the function-signature text that appears in hunk headers, solely for
+`diffextract.py`'s cross-validation (when CodeGraph results completely disagree with the
+hunk header, at least one side is untrustworthy and should degrade to a conflict rather than
+half-trusting each) -- never used directly as the function-name result.
 """
 from __future__ import annotations
 
@@ -18,13 +20,13 @@ from typing import Any
 
 _MAX_DIFF_CHARS = 50000
 
-#: git diff hunk header：`@@ -a,b +c,d @@ <上下文，可能是函数签名>`
+#: git diff hunk header: `@@ -a,b +c,d @@ <context, possibly a function signature>`
 _HUNK_RE = re.compile(r"^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,(\d+))?\s+@@(?:\s+(.*))?$")
 
 
 @dataclass
 class FileDiff:
-    """单个文件的改动行集合（diff 提取的最小可信形态）。"""
+    """A single file's changed-line set (the minimal-trust form of diff extraction)."""
 
     file: str
     changed_lines: list[int] = field(default_factory=list)
@@ -39,11 +41,12 @@ def collect_file_diffs(
     source_path: Path, base_ref: str, head_ref: str, *,
     include_globs: list[str] | None = None, timeout: int = 60,
 ) -> tuple[list[FileDiff], str]:
-    """跑 `git diff -U0` 收集每个文件的改动行号（1-based，与 CodeGraph 一致）。
+    """Run `git diff -U0` to collect each file's changed line numbers (1-based, consistent with CodeGraph).
 
-    ⚠️ `--relative` 必须加：`source_path` 常是 git 仓库的子目录（如仓库根在
-    上一层），不加时 git 输出的路径相对仓库根，与 CodeGraph `nodes.file_path`
-    （相对 source_path）不匹配，后续所有查询全部失效——真实仓库验证过的教训。
+    ⚠️ `--relative` is required: `source_path` is often a subdir of the git repo (e.g. the
+    repo root is one level up); without it, git outputs paths relative to the repo root, which
+    won't match CodeGraph's `nodes.file_path` (relative to source_path), invalidating all
+    downstream queries -- a lesson verified on a real repo.
     """
     globs = include_globs or ["*.c", "*.cc", "*.cpp", "*.cxx", "*.h", "*.hpp"]
     try:
@@ -74,7 +77,8 @@ def collect_file_diffs(
             new_start = int(m.group(1))
             new_count = int(m.group(2)) if m.group(2) is not None else 1
             if new_count == 0:
-                # 纯删除 hunk：新文件里没有对应行，取删除位置那一行作为"受影响行"
+                # pure-deletion hunk: no corresponding line in the new file; take the deletion
+                # position as the "affected line"
                 current.changed_lines.append(new_start)
             else:
                 current.changed_lines.extend(range(new_start, new_start + new_count))

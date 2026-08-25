@@ -1,12 +1,12 @@
-"""AIcoverage CLI 入口。
+"""AIcoverage CLI entrypoint.
 
-子命令：
-  init      在目标项目生成 aicoverage.toml + tests/ harness 脚手架
-  build     插桩构建（clean + build_cmd + .gcno 校验）
-  coverage  采集覆盖率（可选先跑测试）
-  analyze   需求解析/源码理解（analyzer-agent，LLM）
-  loop      完整闭环（analyze → build → gap → gen → verify → execute → quality → …）
-  report    查看某次 run 的状态/最终报告
+Subcommands:
+  init      generate aicoverage.toml + tests/ harness scaffold in the target project
+  build     instrumented build (clean + build_cmd + .gcno verification)
+  coverage  collect coverage (optionally run tests first)
+  analyze   requirement parsing / source understanding (analyzer-agent, LLM)
+  loop      full loop (analyze -> build -> gap -> gen -> verify -> execute -> quality -> ...)
+  report    view a run's status / final report
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from .config import ProjectConfig, load_config
 
 
 def main() -> int:
-    # 环境级配置（认证等）先于一切加载：$AICOV_ENV > AIcoverage/.env
+    # Environment-level config (auth etc.) loads before anything: $AICOV_ENV > AIcoverage/.env
     from .env import load_env_file
     load_env_file()
 
@@ -213,7 +213,7 @@ def _cmd_html(cfg: ProjectConfig, args) -> int:
     if args.from_json:
         cov_path = Path(args.from_json).expanduser()
     else:
-        # 取指定 run（或最近一次 run）里最新一轮的 coverage.json
+        # take the latest round's coverage.json from the given run (or the most recent run)
         run_dirs = []
         if cfg.runs_dir.exists():
             run_dirs = sorted((d for d in cfg.runs_dir.iterdir() if d.is_dir()),
@@ -279,14 +279,16 @@ async def _cmd_analyze(cfg: ProjectConfig, args) -> int:
 
 
 async def _maybe_build_kb(cfg: ProjectConfig, args, *, interactive: bool) -> bool:
-    """闭环前的知识库构建选择（用户需求：执行完整功能之前可选择先构建知识库）。
+    """Knowledge-base build choice before the loop (user requirement: choose to build KB
+    before running full functionality).
 
-    规则：
-    - --with-kb：无条件先构建（已完整则 run_kb_build 内部跳过）
-    - 交互模式（未 --yes）且 wiki 不存在：询问是否先构建（默认推荐 y）
-    - 非交互且未 --with-kb：只打印提示（CI 友好，不阻塞），可用 aicov kb 或 --with-kb
+    Rules:
+    - --with-kb: always build first (run_kb_build skips internally if already complete)
+    - interactive (no --yes) and wiki absent: ask whether to build first (default recommend y)
+    - non-interactive and no --with-kb: just print a hint (CI-friendly, non-blocking); use
+      `aicov kb` or --with-kb
     Returns:
-        True = 已构建（或已存在）；False = 未构建（闭环将不带 wiki 导航）。
+        True = built (or already exists); False = not built (loop runs without wiki navigation).
     """
     from .kb import run_kb_build, wiki_ready
     if getattr(args, "with_kb", False):

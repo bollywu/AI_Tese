@@ -1,26 +1,28 @@
-"""open-code-review（OCR，https://github.com/alibaba/open-code-review）CLI 封装。
+"""open-code-review (OCR, https://github.com/alibaba/open-code-review) CLI wrapper.
 
-OCR 是阿⾥开源的 AI 代码审查⼯具（Apache-2.0）：确定性规则管道 + LLM Agent
-混合架构，`ocr review --from <base> --to <head> --format json` 产出⾏级精度
-的结构化审查评论。本模块把它接⼊ AIcoverage 扫描轨的 S1 阶段（替代/优先于
-⾃研 scan-agent），OCR 产出的评论统⼀转换为本扫描轨的 issue 格式，下游
-（gen 复现⽤例 → verify → execute → 四态裁决）链路不变。
+OCR is Alibaba's open-source AI code-review tool (Apache-2.0): a deterministic rule pipeline +
+LLM Agent hybrid architecture; `ocr review --from <base> --to <head> --format json` produces
+line-precise structured review comments. This module wires it into AIcoverage's scan-track S1
+phase (replacing / prioritized over the built-in scan-agent). OCR comments are uniformly
+converted into this scan track's issue format, so downstream (gen repro case -> verify ->
+execute -> four-state adjudication) stays unchanged.
 
-安装与配置（运行前提）：
-    # 安装（任选其一）
+Install & config (prerequisites):
+    # install (pick one)
     npm install -g @alibaba-group/open-code-review
-    # 或 GitHub Release ⼆进制：opencodereview-linux-amd64 → ~/.local/bin/ocr
-    # 依赖 git >= 2.41
-    # LLM 配置（OpenAI 兼容⾃定义 provider）
+    # or GitHub Release binary: opencodereview-linux-amd64 -> ~/.local/bin/ocr
+    # requires git >= 2.41
+    # LLM config (OpenAI-compatible custom provider)
     ocr config set provider my-gateway
     ocr config set custom_providers.my-gateway.url https://<endpoint>/v1
     ocr config set custom_providers.my-gateway.protocol openai
     ocr config set providers.my-gateway.api_key <key>
     ocr config set model <model-name>
-    ocr llm test   # 验证连通
+    ocr llm test   # verify connectivity
 
-OCR 的 JSON 输出 schema 随版本演进，本模块做**宽容解析**（字段名多候选映射），
-真实 schema 以配置好 LLM 后的实测输出为准校正（见单测的固定样例）。
+OCR's JSON output schema evolves across versions, so this module does **lenient parsing**
+(multi-candidate field-name mapping); the real schema is calibrated against measured output
+after LLM config (see the fixed samples in unit tests).
 """
 from __future__ import annotations
 
@@ -30,10 +32,10 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-#: OCR 评论 JSON⾥常⻅的"问题列表"容器字段名（按优先级探测）
+#: Common container field names for OCR's "issue list" in comment JSON (probed by priority)
 _LIST_KEYS = ("comments", "findings", "issues", "reviews", "results", "items")
 
-#: 统一 issue 各字段在 OCR 评论对象⾥的候选字段名
+#: Candidate field names for each unified-issue field inside an OCR comment object
 _FIELD_CANDIDATES = {
     "file": ("file", "file_path", "path", "filename"),
     "line": ("line", "line_number", "start_line", "line_start"),
@@ -48,11 +50,11 @@ _FIELD_CANDIDATES = {
 
 
 class OcrNotAvailable(RuntimeError):
-    """ocr CLI 未安装。"""
+    """ocr CLI not installed."""
 
 
 class OcrNotConfigured(RuntimeError):
-    """ocr 已安装但 LLM 未配置（provider/model）。"""
+    """ocr installed but LLM not configured (provider/model)."""
 
 
 def is_ocr_available() -> bool:
@@ -60,7 +62,7 @@ def is_ocr_available() -> bool:
 
 
 def _ocr_config_file() -> Path:
-    """OCR 的配置文件路径（未配置时不存在；set 后生成）。多候选位置探测。"""
+    """Path to OCR's config file (absent when unconfigured; created by `set`). Probes multiple locations."""
     import os
     home = Path(os.environ.get("HOME", str(Path.home())))
     candidates = [
@@ -75,10 +77,11 @@ def _ocr_config_file() -> Path:
 
 
 def is_ocr_configured() -> bool:
-    """粗判 LLM 是否已配置：配置文件存在且含 provider/model 键。
+    """Roughly judge whether the LLM is configured: config file exists and has provider/model keys.
 
-    （OCR 未提供非交互的 config 查询命令，只能探测配置文件；宽容处理——
-    探测不到时按"未配置"处理，由调用方降级到 scan-agent 或提示配置。）
+    (OCR offers no non-interactive config-query command, so only the config file can be probed;
+    lenient handling -- when undetectable, treat as "unconfigured" and let the caller fall back
+    to scan-agent or prompt for config.)
     """
     f = _ocr_config_file()
     if not f.exists():
@@ -100,7 +103,7 @@ def _pick(obj: dict, field: str) -> Any:
 
 
 def _extract_comment_list(data: Any) -> list[dict]:
-    """从 OCR JSON 输出中提取评论列表（宽容探测容器字段；顶层数组直接用）。"""
+    """Extract the comment list from OCR JSON output (lenient container probing; top-level array used directly)."""
     if isinstance(data, list):
         return [x for x in data if isinstance(x, dict)]
     if not isinstance(data, dict):
@@ -109,7 +112,7 @@ def _extract_comment_list(data: Any) -> list[dict]:
         v = data.get(key)
         if isinstance(v, list) and v and isinstance(v[0], dict):
             return v
-    # 嵌套一层（如 {"review": {"comments": [...]}}）
+    # nest one level (e.g. {"review": {"comments": [...]}})
     for v in data.values():
         if isinstance(v, dict):
             nested = _extract_comment_list(v)
@@ -119,11 +122,11 @@ def _extract_comment_list(data: Any) -> list[dict]:
 
 
 def parse_ocr_output(raw: str | dict) -> list[dict]:
-    """解析 OCR 的 JSON 输出 → 本扫描轨统一 issue 格式。
+    """Parse OCR's JSON output -> this scan track's unified issue format.
 
-    统一格式与 scan-agent 的 scan_issues.json 完全一致（issue_id/file/lines/
-    severity/category/title/root_cause/trigger_condition/fix_suggestion/
-    function/confidence/source），下游 S2-S5 无感知切换。
+    The unified format is identical to scan-agent's scan_issues.json
+    (issue_id/file/lines/severity/category/title/root_cause/trigger_condition/
+    fix_suggestion/function/confidence/source), so downstream S2-S5 switch without awareness.
     """
     data = raw if isinstance(raw, dict) else None
     if data is None:
@@ -131,9 +134,10 @@ def parse_ocr_output(raw: str | dict) -> list[dict]:
         if not text:
             return []
         try:
-            data = json.loads(text)          # 先整体解析（顶层数组也在此命中）
+            data = json.loads(text)          # try whole-parse first (top-level array also hits here)
         except json.JSONDecodeError:
-            # OCR json 输出可能混有进度行：退化取第一个 '{'/'[' 到最后一个 '}'/']'
+            # OCR json output may mix in progress lines: degrade to taking the first '{'/'['
+            # through the last '}'/']'
             for open_ch, close_ch in (("{", "}"), ("[", "]")):
                 start, end = text.find(open_ch), text.rfind(close_ch)
                 if start >= 0 and end > start:
@@ -165,7 +169,8 @@ def parse_ocr_output(raw: str | dict) -> list[dict]:
             "category": str(_pick(c, "category") or "ocr_review"),
             "title": str(_pick(c, "title") or "OCR 审查发现")[:120],
             "root_cause": str(root_cause),
-            # OCR 评论无显式触发条件字段：留空由 gen 阶段从源码推断
+            # OCR comments have no explicit trigger-condition field: leave empty; gen infers
+            # it from the source
             "trigger_condition": "",
             "fix_suggestion": str(suggestion),
             "function": str(_pick(c, "function") or ""),
@@ -179,10 +184,10 @@ def run_ocr_review(
     source_path: Path, base_ref: str, head_ref: str, *,
     output_path: Path | None = None, timeout: int = 600,
 ) -> tuple[list[dict], str]:
-    """执行 `ocr review --from base --to head --format json`，返回 (issues, 原始输出)。
+    """Run `ocr review --from base --to head --format json`; returns (issues, raw output).
 
     Raises:
-        OcrNotAvailable / OcrNotConfigured：由调用方决定降级到 scan-agent。
+        OcrNotAvailable / OcrNotConfigured: caller decides whether to fall back to scan-agent.
     """
     if not is_ocr_available():
         raise OcrNotAvailable("ocr CLI 未安装（npm i -g @alibaba-group/open-code-review "
@@ -196,7 +201,7 @@ def run_ocr_review(
         "ocr", "review",
         "--from", base_ref, "--to", head_ref,
         "--format", "json", "--output", str(out),
-        "--audience", "agent",       # 程序调用：summary only，进度走 stderr
+        "--audience", "agent",       # programmatic call: summary only; progress via stderr
         "--repo", str(source_path),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,

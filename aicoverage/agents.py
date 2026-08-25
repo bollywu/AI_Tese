@@ -1,20 +1,21 @@
-"""Agent 定义：工具集约束 + system prompt 加载。
+"""Agent definitions: tool-set constraints + system-prompt loading.
 
-AIcoverage 的 LLM agent 全景（执行与覆盖率采集为确定性代码，不设 LLM agent）：
+AIcoverage's LLM agent landscape (execution & coverage collection are deterministic code,
+no LLM agent there):
 
-| agent           | 职责                                     | 可写范围            |
-|-----------------|------------------------------------------|---------------------|
-| analyzer-agent  | 需求解析/源码理解 → 分析报告+测试计划     | .aicoverage/        |
-| coverage-agent  | 未覆盖函数根因分类 → gap_items.json      | run/iter 目录       |
-| gen-agent       | 生成/修改 pytest 用例 → manifest.json     | tests/（含 harness）|
-| verify-agent    | 静态审查 → verify_report.json            | 仅 verify_report.json|
-| quality-agent   | 失败归因/flaky 识别 → quality_report.json | run/iter 目录       |
-| scan-agent      | MR 增量 diff 语义扫描 → scan_issues.json  | 仅 scan_issues.json |
-| kb-agent        | 代码知识库构建 → wiki/ + AGENTS.md        | 仅 wiki/ 与 AGENTS.md |
+| agent           | responsibility                                 | writable scope        |
+|-----------------|-------------------------------------------------|-----------------------|
+| analyzer-agent  | requirement parsing/source understanding -> analysis report + test plan | .aicoverage/ |
+| coverage-agent  | uncovered-function root-cause classification -> gap_items.json | run/iter dir |
+| gen-agent       | generate/modify pytest cases -> manifest.json   | tests/ (incl. harness)|
+| verify-agent    | static review -> verify_report.json             | verify_report.json only|
+| quality-agent   | failure attribution/flaky identification -> quality_report.json | run/iter dir |
+| scan-agent      | MR incremental diff semantic scan -> scan_issues.json | scan_issues.json only |
+| kb-agent        | code knowledge-base build -> wiki/ + AGENTS.md  | wiki/ & AGENTS.md only|
 
-扫描轨的复现用例生成复用 gen-agent（同一工具白名单/hooks），仅通过
-`run_agent(prompt_override=...)` 换用 `prompts/scan_gen_agent.md`（正向断言
-约定与覆盖率轨不同，见该文件）。
+The scan track reuses gen-agent for reproduction-case generation (same tool whitelist/hooks),
+only swapping in `prompts/scan_gen_agent.md` via `run_agent(prompt_override=...)` (its
+positive-assertion conventions differ from the coverage track; see that file).
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from typing import Any
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
-# SDK 底层子 agent 派发工具名（实测结论："Agent" 才是真实名字）
+# SDK's underlying sub-agent dispatch tool name (tested conclusion: "Agent" is the real name)
 _DISPATCH = ["Agent", "Task"]
 
 AGENT_TOOLS: dict[str, list[str]] = {
@@ -85,10 +86,11 @@ def get_description(agent_name: str) -> str:
 
 
 def load_prompt(agent_name: str, prompts_dir: Path | None = None) -> str:
-    """加载 agent system prompt。
+    """Load an agent system prompt.
 
-    prompts_dir（来自配置 [knowledge] prompts_dir）下存在同名 .md 时整份覆盖，
-    否则用内置 aicoverage/prompts/<name>.md。文件名规则：连字符 → 下划线。
+    If a same-named .md exists under prompts_dir (from config [knowledge] prompts_dir), it
+    fully overrides; otherwise use the built-in aicoverage/prompts/<name>.md. Filename rule:
+    hyphen -> underscore.
     """
     file_name = agent_name.replace("-", "_")
     prompt_path = PROMPTS_DIR / f"{file_name}.md"
@@ -103,7 +105,8 @@ def load_prompt(agent_name: str, prompts_dir: Path | None = None) -> str:
 
 def build_agent_definition(agent_name: str, model: str, prompt: str | None = None,
                            prompts_dir: Path | None = None):
-    """构造 SDK AgentDefinition（chat/主编排模式用；loop 单点调用走 system_prompt 路径）。"""
+    """Construct an SDK AgentDefinition (for chat/main-orchestrator mode; loop's single-point
+    calls use the system_prompt path)."""
     from codebuddy_agent_sdk import AgentDefinition
 
     return AgentDefinition(

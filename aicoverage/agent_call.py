@@ -1,16 +1,17 @@
-"""子 agent 调用统一封装（通用化）。
+"""Unified sub-agent call wrapper (generalized).
 
-实战验证过的机制：
-- 失败分类（正交事实集合）：rate_limit / transient / non_retryable /
+Production-validated mechanisms:
+- Failure classification (orthogonal fact set): rate_limit / transient / non_retryable /
   hallucination / context_overflow
-- 幻觉误标治理（2026-08-21）：幻觉判定排除一切可识别基础设施异常，
-  只有"纯净的 tool_uses=0"才是真幻觉
-- 指数退避 + jitter + 总时长闸门（429 立即重试会加剧限流的教训）
-- context_overflow 摘要重启（compact_hook）支持
-- 事件流：task.call / task.return / task.retry / task.backoff /
+- Hallucination mislabel governance (2026-08-21): hallucination judgment excludes all
+  identifiable infrastructure anomalies; only a "pure tool_uses=0" is a true hallucination
+- Exponential backoff + jitter + total-duration gate (the lesson that retrying 429 immediately
+  worsens rate limiting)
+- context_overflow summary-restart (compact_hook) support
+- Event stream: task.call / task.return / task.retry / task.backoff /
   hallucination.detected / diagnostic / recovery.*
 
-环境变量前缀统一为 AICOV_。
+Env var prefix uniformly AICOV_.
 """
 from __future__ import annotations
 
@@ -70,7 +71,7 @@ _CONTEXT_OVERFLOW_KEYWORDS = (
 
 
 class _RetryBackoffConfig:
-    """退避参数（AICOV_RETRY_* 环境变量可覆盖）。"""
+    """Backoff parameters (overridable via AICOV_RETRY_* env vars)."""
 
     def __init__(self) -> None:
         self.base_delay = self._env_float("AICOV_RETRY_BASE_DELAY", 15.0)
@@ -108,9 +109,10 @@ def _ctx_pressure_threshold() -> float:
         return 800_000.0
 
 
-# 明确的 5xx / 网关错误状态码——服务器临时故障，永远应重试，覆盖 generic 关键词
-# 误判（如 HTML 错误页里的 "not found" 会误触 non_retryable）。2026-08-25 修复：
-# ModSecurity kb 构建时 504 Gateway Time-out 被误判 non_retryable 导致构建中断。
+# Explicit 5xx / gateway error status codes -- server-side transient faults, always retry,
+# overriding generic-keyword misjudgments (e.g. "not found" in an HTML error page would
+# wrongly trigger non_retryable). 2026-08-25 fix: a 504 Gateway Time-out during the
+# ModSecurity kb build was misclassified non_retryable and interrupted the build.
 _SERVER_5XX_RE = None
 
 
@@ -130,12 +132,13 @@ def _classify_facts(result: AgentRunResult) -> FailureClassification:
     context_overflow = any(kw in summary for kw in _CONTEXT_OVERFLOW_KEYWORDS)
 
     is_timeout = transient and ("timeout" in summary or "超时" in summary or "挂起" in summary)
-    # 明确的 5xx 网关错误 → 强制 transient（可重试），即使混入 non_retryable 关键词
+    # Explicit 5xx gateway error -> force transient (retryable), even if a non_retryable
+    # keyword is mixed in
     server_5xx = _has_server_5xx(summary)
     if server_5xx:
         non_retryable = False
         transient = True
-    # 幻觉判定排除一切可识别异常（2026-08-21 幻觉误标治理结论）
+    # Hallucination judgment excludes all identifiable anomalies (2026-08-21 conclusion)
     hallucinated = (result.tool_uses == 0
                     and not is_timeout and not context_overflow
                     and not rate_limited and not non_retryable and not transient)
@@ -179,13 +182,13 @@ async def call_agent(
     compact_hook: "Callable[[AgentRunResult], str | None] | None" = None,
     prompt_override: str | None = None,
 ) -> AgentRunResult:
-    """调用子 agent：事件发射 + 失败分类 + 退避重试。
+    """Call a sub-agent: event emission + failure classification + backoff retry.
 
     Args:
-        max_retries: 最大尝试次数（含首次）。verify 等关键阶段建议 3。
-        compact_hook: 上下文溢出/高 token 压力时的摘要重启钩子。
-        prompt_override: 透传 runner.run_agent 的 system prompt 整份替换
-            （扫描轨 gen 变体用）。
+        max_retries: max attempts (including the first). 3 recommended for critical stages like verify.
+        compact_hook: summary-restart hook on context overflow / high token pressure.
+        prompt_override: passthrough to runner.run_agent's full system-prompt replacement
+            (for the scan-track gen variant).
     """
     result: AgentRunResult | None = None
     attempt = 1
@@ -245,7 +248,7 @@ async def call_agent(
                      runs_dir=runs_dir)
         print(f"    ⚠️ {agent_name} 第 {attempt} 次调用失败[{cls.value}]: {result.summary}")
 
-        # 摘要重启：上下文溢出 / 高 token 压力时原样重试无意义
+        # Summary restart: on context overflow / high token pressure, retrying verbatim is pointless
         ctx_pressure = result.total_tokens >= _ctx_pressure_threshold()
         if compact_hook is not None and (cls is FailureClass.CONTEXT_OVERFLOW or ctx_pressure):
             if compact_used < _COMPACT_MAX_PER_CALL:

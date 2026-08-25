@@ -1,21 +1,23 @@
-"""扫描轨：scan-agent 产出的问题清单 → 复现用例闭环 → 四态裁决。
+"""Scan track: scan-agent's issue list -> repro-case loop -> four-state adjudication.
 
-四态裁决模型经真实项目验证。通用化设计：
-- 无远程 DUT 版本对齐问题（AIcoverage 全部本机构建本机执行）
-- 输入是本地 scan-agent 的 scan_issues.json（**不是**外部平台扫描产物），
-  因此完全脱敏——整条链路不访问任何代码托管/评审平台，适用于 GitHub 或
-  任意来源的本地 clone。
+The four-state adjudication model is validated on a real project. Generalization design:
+- no remote-DUT version-alignment concern (AIcoverage builds and runs fully locally)
+- the input is the local scan-agent's scan_issues.json (**not** an external-platform scan
+  artifact), so it's fully sanitized -- the whole chain touches no code hosting/review
+  platform, working for GitHub or any locally cloned source.
 
-四态裁决（关键语义，与二态不同）：
-- confirmed：复现用例 FAIL 且失败类型是业务缺陷（程序表现异常）→ 问题坐实
-- false_positive：复现用例 PASS（程序行为正常）→ 问题疑似误报
-- inconclusive：前置/环境失败（用例没测到点子上，如前置步骤失败、无法构造
-  触发条件）→ 保留人工审查，不能下结论
-- unobservable：gen-agent 静态论证为运行期不可观测（UB no-op/架构假设等）→
-  不生成用例，引用其论证理由
+Four-state adjudication (key semantics, distinct from two-state):
+- confirmed: repro case FAILs and the failure kind is a business defect (program misbehaves)
+  -> the issue is confirmed
+- false_positive: repro case PASSes (program behaves correctly) -> the issue is likely a false positive
+- inconclusive: prerequisite/environment failure (the case didn't actually exercise the point,
+  e.g. a prerequisite step failed, or the trigger condition can't be constructed) -> keep for
+  manual review; no conclusion can be drawn
+- unobservable: gen-agent statically argues it's not observable at runtime (UB no-op /
+  architecture assumption etc.) -> no case generated; cite its reasoning
 
-正向断言约定：复现用例断言"程序行为正确"（PASS=误报 / FAIL=坐实），
-详见 prompts/scan_gen_agent.md。
+Positive-assertion convention: repro cases assert "the program behaves correctly"
+(PASS=false positive / FAIL=confirmed); see prompts/scan_gen_agent.md.
 """
 from __future__ import annotations
 
@@ -138,7 +140,7 @@ async def run_scan_track(
     import os
     os.environ.update(cfg.to_env(run_dir=run_dir))
 
-    # [S1] 扫描：ocr 优先（backend=off 时强制走 agent）
+    # [S1] scan: prefer ocr (backend=off forces agent)
     backend = cfg.scan_backend
     used_backend = "agent"
     if base_ref and head_ref and backend in ("ocr", "auto"):
@@ -160,7 +162,7 @@ async def run_scan_track(
             print(f"      发现 {len(issues)} 个疑似问题（open-code-review）")
         except (ImportError, RuntimeError) as e:
             if backend == "ocr":
-                # 显式指定 ocr 失败 → 报错退出而非静默降级（显式配置应当被尊重）
+                # explicit ocr failure -> error out rather than silent degrade (explicit config should be respected)
                 print(f"  ❌ [scan] backend=ocr 不可用: {e}")
                 raise
             print(f"  ⚠️ open-code-review 不可用（{e}），降级 scan-agent")
@@ -186,11 +188,11 @@ async def run_scan_track(
         result["verdicts"] = {}
         return result
 
-    # [S2] gen-agent（scan_gen 变体）生成复现用例
+    # [S2] gen-agent (scan_gen variant) generates repro cases
     print("  [S2] 复现用例生成（gen-agent，scan 变体：正向断言）")
     manifest_path = scan_dir / "manifest.json"
     obs.emit("stage.enter", run_id, stage="scan_gen", runs_dir=runs_dir)
-    scan_gen_prompt = load_prompt("gen-agent", cfg.prompts_dir)  # 默认占位，下面整份替换
+    scan_gen_prompt = load_prompt("gen-agent", cfg.prompts_dir)  # default placeholder; fully replaced below
     try:
         scan_gen_prompt = (Path(__file__).parent / "prompts" / "scan_gen_agent.md").read_text(
             encoding="utf-8")
@@ -211,8 +213,8 @@ async def run_scan_track(
              data={"files": len(manifest.get("test_files", []))})
     result["manifest"] = manifest
 
-    # [S3] verify-agent 静态审查（复用，含 EC-07 文档头门禁——由调用方 loop 统一
-    # 跑还是这里跑？这里独立跑一遍扫描轨文件子集）
+    # [S3] verify-agent static review (reused; includes EC-07 doc-header gate -- whether the
+    # caller's loop runs it or not, we run it independently over the scan track's file subset)
     from .docstyle import check_test_docstrings
     verify_report = {"verdict": "fail", "problems": []}
     if manifest.get("test_files"):
@@ -238,7 +240,8 @@ async def run_scan_track(
         obs.emit("stage.exit", run_id, stage="scan_verify", runs_dir=runs_dir,
                  data={"verdict": verify_report.get("verdict")})
 
-    # [S4] 确定性执行（只跑本轮复现用例文件，避免混入全量用例结果）
+    # [S4] deterministic execution (run only this round's repro-case files, avoiding mixing in
+    # full-case results)
     execution = None
     if manifest.get("test_files") and verify_report.get("verdict") == "pass":
         print("  [S4] 执行复现用例（确定性 executor，仅本轮文件）")
@@ -253,7 +256,7 @@ async def run_scan_track(
                  data=execution.to_dict())
         result["execution"] = execution.to_dict()
 
-    # [S5] 四态裁决
+    # [S5] four-state adjudication
     verdicts = compute_verdicts(issues, manifest, dispositions, execution,
                                 verify_report)
     result["verdicts"] = verdicts
@@ -273,17 +276,17 @@ def compute_verdicts(
     execution,
     verify_report: dict,
 ) -> dict[str, dict]:
-    """四态裁决（确定性规则，无 LLM）。
+    """Four-state adjudication (deterministic rules, no LLM).
 
-    判定顺序：
-    1. disposition=unobservable → unobservable（引用 gen 静态论证理由）
-    2. 无复现用例（disposition 缺失或非 e2e）→ inconclusive
-    3. verify fail（用例本身没通过静态审查）→ inconclusive（用例质量问题，
-       不代表问题真伪，必须保留人工审查）
-    4. 执行结果：
-       - FAIL → confirmed（正向断言约定下，程序表现异常 = 缺陷坐实）
-       - PASS → false_positive（程序行为正常 = 缺陷疑似误报）
-       - 未执行 → inconclusive
+    Order of decisions:
+    1. disposition=unobservable -> unobservable (cite gen's static-argumentation reason)
+    2. no repro case (disposition missing or not e2e) -> inconclusive
+    3. verify fail (the case itself failed static review) -> inconclusive (a case-quality issue;
+       it does not tell the issue's truth; manual review must be kept)
+    4. execution result:
+       - FAIL -> confirmed (under the positive-assertion convention, program misbehavior = defect confirmed)
+       - PASS -> false_positive (program behaves correctly = defect likely a false positive)
+       - not executed -> inconclusive
     """
     verdicts: dict[str, dict] = {}
     for issue in issues:
@@ -320,7 +323,7 @@ def compute_verdicts(
 
 
 def render_scan_markdown(result: dict) -> str:
-    """渲染扫描轨 Markdown 片段（嵌入 MR 最终报告用）。"""
+    """Render the scan-track Markdown snippet (for embedding in the MR final report)."""
     issues = result.get("issues", [])
     verdicts: dict = result.get("verdicts", {})
     if not issues:

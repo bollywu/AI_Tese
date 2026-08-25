@@ -1,21 +1,21 @@
-"""覆盖率闭环状态机（确定性驱动）。
+"""Coverage-loop state machine (deterministically driven).
 
-流程（每轮迭代）：
+Flow (per iteration):
 
-    [0] analyze   — analyzer-agent：需求解析 + 源码理解（首轮一次，fail-soft）
-    [1] build     — 确定性插桩构建（失败即 early_stop）
-    [2] baseline  — 已有用例先跑一遍取基线覆盖率（无用例则 gcov 全 0 清单）
+    [0] analyze   -- analyzer-agent: requirement parsing + source understanding (once, fail-soft)
+    [1] build     -- deterministic instrumented build (early-stop on failure)
+    [2] baseline  -- run existing cases once for a baseline coverage (or a gcov all-zero list if none)
     loop iter 1..max_iter:
-      [a] gap      — coverage-agent：未覆盖函数根因分类（fail-soft，降级为裸清单）
-      [b] gen      — gen-agent：生成/修复用例 → manifest.json
-      [c] verify   — verify-agent：静态审查；fail → gen 修复回环（≤max_verify_retry）
-      [d] execute  — 确定性 executor：pytest + gcov 采集 → junit/execution/coverage
-      [e] quality  — quality-agent（执行非 PASS 时）：失败归因 → action_items
-      [f] update   — 状态/事件/delta 更新，达标或早停判定
-    [3] final     — loop_final_report.md
+      [a] gap      -- coverage-agent: uncovered-function root-cause classification (fail-soft, degrades to a bare list)
+      [b] gen      -- gen-agent: generate/fix cases -> manifest.json
+      [c] verify   -- verify-agent: static review; fail -> gen fix loop (<=max_verify_retry)
+      [d] execute  -- deterministic executor: pytest + gcov collection -> junit/execution/coverage
+      [e] quality  -- quality-agent (when execution not PASS): failure attribution -> action_items
+      [f] update   -- state/event/delta update, threshold or early-stop decision
+    [3] final     -- loop_final_report.md
 
-退出条件：threshold_met | max_iter_reached | execute_fail_loop |
-           coverage_ceiling | gen_no_output | verify_fail_exceeded | build_failed
+Exit conditions: threshold_met | max_iter_reached | execute_fail_loop |
+                 coverage_ceiling | gen_no_output | verify_fail_exceeded | build_failed
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ from .gcov import CoverageReport, collect as gcov_collect
 from .runner import AgentRunner
 
 
-# ── prompt 构造 ─────────────────────────────────────────────────────
+# ── Prompt construction ──────────────────────────────────────────────
 
 def _prompt_analyze(cfg: ProjectConfig, run_dir: Path, requirement: str,
                     files_preview: str) -> str:
@@ -200,7 +200,7 @@ pytest 日志：{iter_dir / "pytest.log"}
 同模式的不重复提议；无新模式输出空数组。）"""
 
 
-# ── 主闭环 ──────────────────────────────────────────────────────────
+# ── Main loop ────────────────────────────────────────────────────────
 
 async def run_loop(
     cfg: ProjectConfig,
@@ -275,7 +275,7 @@ async def run_loop(
         except (json.JSONDecodeError, OSError):
             return None
 
-    # ── [0] 需求解析（fail-soft） ──────────────────────────────
+    # ── [0] Requirement parsing (fail-soft) ─────────────────────
     plan_summary = ""
     if not skip_analyze:
         print("▶ [0] 需求解析（analyzer-agent）")
@@ -296,7 +296,7 @@ async def run_loop(
         obs.emit("stage.exit", run_id, stage="analyze", runs_dir=runs_dir,
                  data={"success": res.success, "plan": bool(plan)})
 
-    # ── [1] 插桩构建 ───────────────────────────────────────────
+    # ── [1] Instrumented build ──────────────────────────────────
     if skip_build:
         print("▶ [1] 插桩构建（跳过——调用方保证二进制已是最新插桩版本）")
     else:
@@ -313,7 +313,7 @@ async def run_loop(
         obs.emit("build.ok", run_id, runs_dir=runs_dir, data=build_res.to_dict())
         print(f"  ✅ 构建成功（{build_res.gcno_count} 个插桩单元，{build_res.duration_s:.1f}s）")
 
-    # ── [2] 基线覆盖率 ─────────────────────────────────────────
+    # ── [2] Baseline coverage ───────────────────────────────────
     baseline_dir = run_dir / "iter_0"
     baseline_dir.mkdir(parents=True, exist_ok=True)
     existing_tests = list(cfg.test_dir.glob("test_*.py")) if cfg.test_dir.exists() else []
@@ -335,31 +335,32 @@ async def run_loop(
     consecutive_gen_empty = 0
     quality_actions: list[dict] = []
 
-    # ── 迭代 ───────────────────────────────────────────────────
+    # ── Iteration ───────────────────────────────────────────────
     for iter_n in range(1, max_iter + 1):
         iter_dir = st.iter_dir(runs_dir, run_id, iter_n)
         st.start_iteration(runs_dir, run_id, iter_n)
         print(f"\n▶ 迭代 {iter_n}/{max_iter}")
         gap_source = previous if previous is not None else baseline_report
-        # scope 模式：gap 只看收窄视图内的未覆盖函数（增量分母）
+        # scope mode: gap only looks at uncovered functions in the narrowed view (incremental denominator)
         if target_functions:
             gap_source_view = scope_report(gap_source, target_functions)
         else:
             gap_source_view = gap_source
         uncovered = [f.to_dict() for f in gap_source_view.uncovered_functions()]
         if not uncovered:
-            # 函数级已全覆盖。两种情况：
-            # a) 分支也达标（或无可测分支）→ 直接 threshold_met 干净退出
-            # b) 存在未命中分支 → 以"含未命中分支的函数"为 gap 继续（函数级
-            #    uncovered 清单会漏掉这种场景，直接 break 会导致永远到不了 85%）
+            # Function level fully covered. Two cases:
+            # a) branches also meet the target (or no testable branch) -> clean threshold_met exit
+            # b) some branch unhit -> continue with "functions containing unhit branches" as the
+            #    gap (the function-level uncovered list misses this; a bare break can never reach 85%)
             prev_view = (scope_report(previous, target_functions)
                          if target_functions and previous is not None
                          else (previous if previous is not None else baseline_report))
             cond_ok = (gap_source_view.cond_pct >= cond_target
                        or gap_source_view.branch_total == 0)
             if cond_ok:
-                # vacuous cond：无可测分支时 cond 显示口径记 100%（cond_vacuous
-                # 标注真实语义），避免"达标但显示 0%"的自相矛盾
+                # vacuous cond: when no testable branch, the cond display records 100%
+                # (cond_vacuous marks the real semantics), avoiding the "met but shows 0%"
+                # self-contradiction
                 vacuous = gap_source_view.branch_total == 0
                 cond_out = 100.0 if vacuous else gap_source_view.cond_pct
                 print("  ✅ 无未覆盖函数且分支达标"
@@ -382,7 +383,7 @@ async def run_loop(
                 obs.emit("loop.threshold_met", run_id, runs_dir=runs_dir,
                          data={"iter": iter_n})
                 break
-            # 分支未达标：以含未命中分支的函数作为 gap 来源
+            # Branches not met: use functions containing unhit branches as the gap source
             partial = sorted({b.function for fc in gap_source_view.files.values()
                               for b in fc.branches if not b.hit and b.function})
             uncovered = [
@@ -403,7 +404,7 @@ async def run_loop(
                 break
             print(f"  ℹ️ 函数已全覆盖，仍有 {len(uncovered)} 个函数存在未命中分支，继续补分支")
 
-        # [a] 缺口分析
+        # [a] gap analysis
         cov_path = iter_dir / "coverage_in.json"
         gap_source.save(cov_path)
         if skip_gap_agent:
@@ -429,7 +430,7 @@ async def run_loop(
                 print("      ⚠️ gap_items 缺失，降级为裸清单")
             obs.emit("stage.exit", run_id, iter_n=iter_n, stage="gap", runs_dir=runs_dir)
 
-        # [b] 用例生成
+        # [b] case generation
         print("  [b] 用例生成（gen-agent）")
         manifest_path = iter_dir / "manifest.json"
         obs.emit("stage.enter", run_id, iter_n=iter_n, stage="gen", runs_dir=runs_dir)
@@ -439,7 +440,7 @@ async def run_loop(
                         quality_actions or None, manifest_path,
                         target_context=target_context),
             iter_dir, iter_n, "gen", retries=2)
-        quality_actions = []  # 只回流一轮
+        quality_actions = []  # only reflux one round
         manifest = _read_json(manifest_path)
         if not manifest or not manifest.get("test_files"):
             consecutive_gen_empty += 1
@@ -462,11 +463,11 @@ async def run_loop(
         print(f"      生成 {len(manifest.get('test_files', []))} 个文件 / "
               f"{len(manifest.get('new_functions', []))} 个用例函数")
 
-        # [c] 静态审查（fail → gen 修复回环）
-        # c0：确定性文档头门禁（零 LLM 成本）——每个 test_* 函数的 docstring
-        # 必须含"描述"+"测试点"两个字段，便于人工静态审查（不用跑 pytest 看
-        # 日志才知道用例在测什么）。结果合并进 verify_report.json（EC-07），
-        # 与 verify-agent 的语义审查（V1-V5）互补，不重复消耗 token。
+        # [c] static review (fail -> gen fix loop)
+        # c0: deterministic doc-header gate (zero LLM cost) -- every test_* function's docstring
+        # must contain "描述" + "测试点" fields for manual static review (no need to run pytest
+        # and read logs to know what a case tests). The result is merged into verify_report.json
+        # (EC-07), complementing verify-agent's semantic review (V1-V5) without extra tokens.
         print("  [c] 静态审查（verify-agent + 文档头门禁）")
         verify_ok = False
         for attempt in range(1 + limits["max_verify_retry"]):
@@ -500,9 +501,10 @@ async def run_loop(
             if attempt >= limits["max_verify_retry"]:
                 break
             print(f"      ⚠️ 审查未过（error {len(errors)}），回环修复（第 {attempt + 1} 次）")
-            # 时序防误判：gen 修复前快照 manifest 声明文件的内容指纹，修复后对比。
-            # 若 gen 未实际改动任何文件（verify 报的是旧问题时 gen 修了但没落盘/
-            # 或 verify 时序上读到旧版），避免进入下一轮对"旧文件"的无意义 verify。
+            # timing-guard against false positives: snapshot the manifest files' content
+            # fingerprint before gen_fix, compare after. If gen didn't actually change any file
+            # (verify reported old issues but gen fixed without persisting / verify read a stale
+            # version timing-wise), avoid a pointless next verify round on the "old files".
             before = _snapshot_manifest_files(cfg, manifest)
             await _call("gen-agent",
                         _prompt_gen_fix(cfg, iter_dir, problems, manifest_path),
@@ -529,7 +531,7 @@ async def run_loop(
             st.set_exit(runs_dir, run_id, "early_stop", "verify_fail_exceeded")
             break
 
-        # [d] 执行（确定性）
+        # [d] execution (deterministic)
         print("  [d] 执行 pytest + gcov 采集")
         obs.emit("stage.enter", run_id, iter_n=iter_n, stage="execute", runs_dir=runs_dir)
         execution = run_tests(cfg, iter_dir)
@@ -543,7 +545,7 @@ async def run_loop(
             "gen_output": "ok",
         })
 
-        # [e] 质量分析（非 PASS 时）
+        # [e] quality analysis (when not PASS)
         if execution.verdict != "PASS":
             print("  [e] 失败分析（quality-agent）")
             obs.emit("stage.enter", run_id, iter_n=iter_n, stage="quality", runs_dir=runs_dir)
@@ -560,7 +562,7 @@ async def run_loop(
                 quality_actions = quality.get("action_items", [])
                 print(f"      verdict={quality.get('verdict')} "
                       f"action_items={len(quality_actions)}")
-                # badcase 沉淀（LLM 提议 → 确定性代码裁决入库）
+                # badcase accumulation (LLM proposes -> deterministic code adjudicates into the library)
                 candidates = quality.get("badcase_candidates") or []
                 if candidates:
                     from .badcase import merge_candidates
@@ -573,13 +575,13 @@ async def run_loop(
                                      "merged": merged["merged"],
                                      "rejected": len(merged["rejected"])})
 
-        # [f] 覆盖率增量与状态更新
+        # [f] coverage delta and state update
         if execution.coverage_path and execution.coverage_path.exists():
             current_full = CoverageReport.load(execution.coverage_path)
         else:
             current_full = gap_source
-        # scope 模式：达标/展示指标全部用收窄视图（函数级增量覆盖率），
-        # 全量指标另存 full_* 键，两者不混淆。
+        # scope mode: threshold/display metrics all use the narrowed view (function-level
+        # incremental coverage); full metrics are stored separately under full_* keys.
         if target_functions:
             current = scope_report(current_full, target_functions)
             prev_view = (scope_report(previous, target_functions) if previous is not None
@@ -619,9 +621,9 @@ async def run_loop(
                         {"func_pct": current.func_pct, "cond_pct": current.cond_pct,
                          **({"scope": True} if target_functions else {})})
             break
-        # vacuous cond：scope 内没有任何可测分支时，cond 阈值视为满足
-        # （stats_alloc 这类顺序无分支函数的 cond_pct=0 是"分母为 0"的显示口径，
-        # 不代表未达标——若 func 已达标则整体达标）
+        # vacuous cond: when the scope has no testable branch at all, the cond threshold is
+        # treated as met (for sequential branchless functions like stats_alloc, cond_pct=0 is
+        # a "denominator 0" display artifact, not a failure -- if func already meets, it's overall met)
         if (target_functions and current.branch_total == 0
                 and current.func_pct >= func_target):
             print("      ✅ scope 内无可测分支，cond 阈值视为满足（vacuous）")
@@ -651,8 +653,8 @@ async def run_loop(
                     {"func_pct": previous.func_pct if previous else 0,
                      "cond_pct": previous.cond_pct if previous else 0})
 
-    # scope 模式：结束时校验 target 是否全部出现在覆盖率数据里，
-    # 不在的（拼写不一致/未插桩/已删除）必须显式报告，不能静默忽略。
+    # scope mode: at the end, verify every target appears in the coverage data; any that don't
+    # (spelling mismatch / not instrumented / deleted) must be explicitly reported, never silently ignored.
     if target_functions and previous is not None:
         miss = missing_targets(previous, target_functions)
         if miss:
@@ -663,14 +665,14 @@ async def run_loop(
 
 
 def _finalize(cfg: ProjectConfig, runs_dir: Path, run_id: str) -> dict:
-    """生成最终报告（含 HTML 覆盖率报告）并返回最终状态。"""
+    """Generate the final report (incl. the HTML coverage report) and return the final state."""
     try:
         final_state = st.load_loop_state(runs_dir, run_id)
     except FileNotFoundError:
         final_state = {"run_id": run_id, "status": "error", "exit_reason": "state_missing"}
 
-    # HTML 覆盖率报告（每次 loop 结束必出，报告生成不是闭环单点故障）；
-    # 失败不阻断闭环收尾（报告生成不是闭环单点故障）。
+    # HTML coverage report (always produced at loop end; report generation is not a single
+    # point of failure for the loop); a failure must not block the loop's wrap-up.
     html_index = _generate_html_report(cfg, runs_dir, run_id)
     if html_index:
         final_state.setdefault("final_metrics", {})["html_report"] = str(html_index)

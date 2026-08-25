@@ -1,18 +1,22 @@
-"""确定性用例文档头检查（静态 AST 解析，零 LLM token 成本）。
+"""Deterministic test doc-header gate (static AST parsing, zero LLM token cost).
 
-要求每个 `test_*` 函数的 docstring 必须包含两个字段：
-  - 描述：一句话说明这个用例在验证什么行为（面向不熟悉源码的审查者）
-  - 测试点：对应的源码位置/分支条件（与 harness.print_test_point_box() 的
-    `what` 参数保持一致，便于静态审查时对照运行日志核实）
+Requires every `test_*` function's docstring to contain two fields:
+  - 描述 (description): one sentence on what behavior this case verifies (for
+    reviewers unfamiliar with the source)
+  - 测试点 (test point): the corresponding source location/branch condition (kept
+    consistent with harness.print_test_point_box()'s `what` arg, so static review
+    can cross-check against runtime logs)
 
-这是一道**确定性前置门禁**，与 verify-agent 的语义审查（V1-V5，判断断言是否
-正确、是否遵守原子化等）互补：本检查纯格式校验、不涉及任何语义判断，不消耗
-LLM token，由 `loop.py` 在静态审查阶段自动运行并把结果合并进
-`verify_report.json`（问题编码 EC-07）。
+This is a deterministic pre-gate, complementary to verify-agent's semantic review
+(V1-V5: whether assertions are correct, whether atomicity is respected, etc.):
+this check is pure format validation with no semantic judgment and no LLM token
+cost. It runs automatically in loop.py's static-review phase and is merged into
+`verify_report.json` (problem code EC-07).
 
-设计动机（2026-08-24）：此前用例的"可审查性"完全依赖 print_test_point_box()
-的**运行时输出**——审查者必须先跑一遍 pytest 看日志才知道每个用例在测什么。
-本模块把这个信息前移到**源码 docstring**，静态读代码（不运行）就能审查。
+Design rationale (2026-08-24): previously a case's "auditability" depended entirely
+on print_test_point_box()'s runtime output -- reviewers had to run pytest and read
+logs to know what each case tested. This module moves that info forward into the
+source docstring so review can happen statically (no execution).
 """
 from __future__ import annotations
 
@@ -20,7 +24,7 @@ import ast
 import re
 from pathlib import Path
 
-# 允许中文全角/半角冒号，及可选的英文别名
+# Allow full/half-width Chinese colons, plus optional English aliases
 _DESC_RE = re.compile(r"(描述|Description)\s*[:：]\s*\S")
 _POINT_RE = re.compile(r"(测试点|Test\s*Point)\s*[:：]\s*\S")
 
@@ -30,11 +34,12 @@ EC_MISSING_DOC = "EC-07"
 
 
 def check_file(path: Path) -> list[dict]:
-    """检查单个测试文件里每个 `test_*` 函数的 docstring 是否含 描述/测试点。
+    """Check each `test_*` function's docstring in one test file for 描述/测试点.
 
-    返回 verify_report.json 兼容的 problem 字典列表（可直接 extend 进
-    `problems` 数组）。文件解析失败（语法错误）也报告为一条 error，交给
-    gen-agent 修复——不静默跳过，避免"文件坏了但检查器没发现"。
+    Returns verify_report.json-compatible problem dicts (can be directly extended
+    into the `problems` array). Parse failures (syntax errors) are also reported as
+    an error for gen-agent to fix -- not silently skipped, so a broken file never
+    escapes the checker undetected.
     """
     problems: list[dict] = []
     try:
@@ -80,11 +85,12 @@ def check_file(path: Path) -> list[dict]:
 
 
 def check_test_docstrings(test_dir: Path, filenames: list[str] | None = None) -> list[dict]:
-    """检查 `test_dir` 下（或 `filenames` 指定的）全部 `test_*.py` 用例文档头。
+    """Check doc headers of all `test_*.py` cases under `test_dir` (or the given `filenames`).
 
-    `filenames` 为 None 时扫描整个目录（用于存量回归/健康检查）；传入具体
-    文件名列表时只检查这些文件（用于闭环里"只查本轮新增/修改的文件"，
-    不因历史遗留文件的问题阻塞当前轮）。
+    When `filenames` is None, scan the whole dir (for legacy regression/health checks);
+    when a specific filename list is passed, only those files are checked (for the loop's
+    "only review this round's new/modified files", so legacy-file problems don't block the
+    current round).
     """
     problems: list[dict] = []
     if filenames:

@@ -1,8 +1,8 @@
-"""loop_state.json 状态管理（runs_dir 参数化，跨项目通用）。
+"""loop_state.json state management (runs_dir parameterized, project-agnostic).
 
-所有闭环状态的唯一真源：每步更新前先读、更新后写回。
-契约字段（thresholds/limits/iterations/coverage_after/delta）保持稳定，
-runs_dir 由调用方传入（每个目标项目独立）。
+Single source of truth for all loop state: read before each update, write back after.
+Contract fields (thresholds/limits/iterations/coverage_after/delta) stay stable;
+runs_dir is passed by the caller (each target project is independent).
 """
 from __future__ import annotations
 
@@ -92,7 +92,7 @@ def update_iteration(runs_dir: Path, run_id: str, iter_n: int, updates: dict[str
 
 
 def update_state(runs_dir: Path, run_id: str, updates: dict[str, Any]) -> dict:
-    """顶层字段更新（如 MR 模式写入 scope 元信息）。"""
+    """Update top-level fields (e.g. MR mode writing scope metadata)."""
     state = load_loop_state(runs_dir, run_id)
     for k, v in updates.items():
         state[k] = v
@@ -113,7 +113,7 @@ def set_exit(runs_dir: Path, run_id: str, status: str, exit_reason: str,
 
 
 def check_threshold(state: dict, iter_n: int) -> bool:
-    """达标判定：func_pct 与 cond_pct 同时达到阈值。"""
+    """Threshold check: func_pct and cond_pct both meet their thresholds."""
     current = next((it for it in state["iterations"] if it["iter"] == iter_n), None)
     if not current:
         return False
@@ -124,11 +124,11 @@ def check_threshold(state: dict, iter_n: int) -> bool:
 
 
 def check_early_stop(state: dict) -> str | None:
-    """早停条件：
-    - current_iter >= max_iter → max_iter_reached
-    - current_iter < 2 时不允许早停
-    - 连续 no_progress_iters 轮 execute_verdict=FAIL → execute_fail_loop
-    - 连续 no_progress_iters 轮覆盖率无增长（且 execute 非 FAIL）→ coverage_ceiling
+    """Early-stop conditions:
+    - current_iter >= max_iter -> max_iter_reached
+    - no early stop when current_iter < 2
+    - no_progress_iters consecutive rounds with execute_verdict=FAIL -> execute_fail_loop
+    - no_progress_iters consecutive rounds with no coverage growth (and execute not FAIL) -> coverage_ceiling
     """
     limits = state["limits"]
     current_iter = state["current_iter"]
