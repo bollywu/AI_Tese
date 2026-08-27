@@ -179,3 +179,117 @@ class TestFinalReportUnitConfirm:
         assert "单测覆盖待人工确认" in md
         assert "parse_url_invalid" in md
         assert "无入口" in md
+
+
+# ── Go E2E-first governance ───────────────────────────────────────────
+
+def _write_go_test(root, rel, body):
+    p = root / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body, encoding="utf-8")
+    return p
+
+
+class TestGoTestScope:
+    def test_unit_classification(self, tmp_path):
+        from aicoverage.go_test_scope import classify_go_test_file
+        root = tmp_path
+        f = _write_go_test(root, "srv_test.go",
+                           "package srv\n"
+                           "func TestAdd(t *testing.T) {\n"
+                           "\tif Add(1,2) != 3 { t.Fatal(\"bad\") }\n"
+                           "}\n")
+        funcs = classify_go_test_file(f, root)
+        assert len(funcs) == 1
+        assert funcs[0].name == "TestAdd"
+        assert funcs[0].source == "unit"  # no HTTP/net signal
+
+    def test_e2e_classification_http(self, tmp_path):
+        from aicoverage.go_test_scope import classify_go_test_file
+        root = tmp_path
+        f = _write_go_test(root, "api_test.go",
+                           "package api\n"
+                           "import \"net/http/httptest\"\n"
+                           "func TestHandler(t *testing.T) {\n"
+                           "\trec := httptest.NewRecorder()\n"
+                           "\t_ = rec\n"
+                           "}\n")
+        funcs = classify_go_test_file(f, root)
+        assert funcs[0].source == "e2e"  # httptest signal
+
+    def test_e2e_classification_gin(self, tmp_path):
+        from aicoverage.go_test_scope import classify_go_test_file
+        root = tmp_path
+        f = _write_go_test(root, "router_test.go",
+                           "package r\n"
+                           "import \"github.com/gin-gonic/gin\"\n"
+                           "func TestRoute(t *testing.T) {\n"
+                           "\tr := gin.New()\n"
+                           "\t_ = r\n"
+                           "}\n")
+        funcs = classify_go_test_file(f, root)
+        assert funcs[0].source == "e2e"
+
+    def test_gorm_delete_not_false_positive(self, tmp_path):
+        """`db.Delete(...)` (gorm) must NOT be classified e2e."""
+        from aicoverage.go_test_scope import classify_go_test_file
+        root = tmp_path
+        f = _write_go_test(root, "svc_test.go",
+                           "package s\n"
+                           "func TestDelete(t *testing.T) {\n"
+                           "\tdb.Delete(&v)\n"
+                           "}\n")
+        funcs = classify_go_test_file(f, root)
+        assert funcs[0].source == "unit"
+
+
+class TestGoE2EFirstGate:
+    def test_go_unittest_hint(self, tmp_path):
+        from aicoverage.loop import _unittest_hint
+        cfg = ProjectConfig.minimal(tmp_path, name="p", language="go")
+        hint = _unittest_hint(cfg)
+        assert "E2E/集成测试优先" in hint
+        assert "unit_confirm_required" in hint
+        assert "httptest" in hint
+
+    def test_go_write_instruction_mentions_e2e(self, tmp_path):
+        from aicoverage.loop import _gen_write_instruction
+        cfg = ProjectConfig.minimal(tmp_path, name="p", language="go")
+        inst = _gen_write_instruction(cfg)
+        assert "_test.go" in inst
+        assert "unit_confirm_required" in inst
+
+    def test_go_auto_detect_unit_tests(self, tmp_path):
+        """A generated *_test.go with a pure unit test should surface as pending via the
+        gate even if gen didn't declare unit_confirm_required."""
+        from aicoverage.loop import _confirm_unit_coverage
+        root = tmp_path / "proj"
+        _write_go_test(root, "internal/svc/svc_test.go",
+                       "package svc\n"
+                       "func TestDoWork(t *testing.T) {\n"
+                       "\tDoWork()\n"
+                       "}\n")
+        cfg = ProjectConfig.minimal(root, name="p", language="go")
+        manifest = {"test_files": ["internal/svc/svc_test.go"],
+                    "new_functions": ["TestDoWork"]}
+        res = _confirm_unit_coverage(cfg, manifest, interactive=False)
+        # 1 pure-unit test auto-detected -> pending (require_unit_confirm=True, no auto_yes)
+        assert len(res["pending"]) == 1
+        assert res["pending"][0]["function"] == "TestDoWork"
+        assert len(res["confirmed"]) == 0
+
+    def test_go_auto_detect_skips_e2e(self, tmp_path):
+        """A generated *_test.go with an e2e/HTTP test should NOT be flagged pending."""
+        from aicoverage.loop import _confirm_unit_coverage
+        root = tmp_path / "proj"
+        _write_go_test(root, "internal/api/api_test.go",
+                       "package api\n"
+                       "import \"net/http/httptest\"\n"
+                       "func TestHTTPHandler(t *testing.T) {\n"
+                       "\thttptest.NewServer(nil)\n"
+                       "}\n")
+        cfg = ProjectConfig.minimal(root, name="p", language="go")
+        manifest = {"test_files": ["internal/api/api_test.go"],
+                    "new_functions": ["TestHTTPHandler"]}
+        res = _confirm_unit_coverage(cfg, manifest, interactive=False)
+        assert res["pending"] == [] and res["confirmed"] == []

@@ -198,6 +198,8 @@ your-project/
 
 **E2E-first coverage governance + unit-test human confirmation (2026-08-27)**: all coverage must be reached through E2E first; a function that genuinely cannot be E2E-reached may only be covered by a unit test after **explicit human confirmation**. gen-agent declares every unit-test-covered function in `manifest.unit_confirm_required` (with evidence of why E2E is impossible); the loop runs a confirmation gate (interactive y/n per function, or auto-approve via `unit_confirm_auto_yes` for CI); the final report lists every single-test coverage still **pending human confirmation**. Configurable in `[coverage]`: `e2e_first`, `require_unit_confirm`, `unit_confirm_auto_yes`.
 
+For **Go** the same E2E-first discipline applies: gen must prefer integration tests that exercise the real HTTP/net path (`httptest`/`gin` server), and pure unit tests (direct method calls, in-memory/mocked deps) need confirmation. `aicoverage/go_test_scope.py` statically classifies each `*_test.go` function as `e2e` (HTTP/net signals) or `unit` (no network signal); the loop auto-detects pure-unit tests even if gen forgot to declare them, and they enter the confirmation gate automatically.
+
 **Stability hardening**:
 - **Link-failure self-healing**: on `undefined reference` (missing library), `compile_unit_driver` automatically tries common libraries (`-lm`/`-lpthread`/`-lrt`/`-ldl`/`-lz`) one by one; if all fail it hints to fill `[unittest] link_libs`
 - **Driver crash detection**: `run_driver` detects signal-terminated drivers (e.g. SIGSEGV) and clearly distinguishes driver-construction bugs from real defects in the function under test

@@ -78,11 +78,20 @@ P0（N3/N4/N6）进 items（≤25 个），其余进 noise。"""
 
 def _unittest_hint(cfg: ProjectConfig) -> str:
     """单测通道引导：默认 e2e 优先；当缺口根因是 e2e 不可达（N1/N3/N5）时才允许
-    走"直接调用目标函数"的单测通道，且该单测覆盖必须声明到 manifest 的
-    unit_confirm_required 字段等待人工确认。"""
-    cc = cfg.ut_compiler or "（跟随 build 体系，建议 gcc/g++）"
+    走单测通道，且该单测覆盖必须声明到 manifest 的 unit_confirm_required 字段等待人工确认。
+
+    Language-aware:
+      - C/C++: e2e = run_binary on the instrumented binary; unit = compile_unit_driver.
+      - Go: e2e = test that exercises the app's real HTTP/net path (starts a server, issues
+        requests); unit = test that instantiates the object and calls methods directly
+        (in-memory/mocked deps). All Go tests are *_test.go; the classifier in
+        go_test_scope distinguishes source. Pure unit tests must be declared.
+    """
     if not cfg.e2e_first:
         return ""  # e2e-first 纪律关闭，不注入单测约束（保持旧行为）
+    if getattr(cfg, "language", "c") == "go":
+        return _go_e2e_first_hint(cfg)
+    cc = cfg.ut_compiler or "（跟随 build 体系，建议 gcc/g++）"
     return f"""
 ## 覆盖来源铁律：E2E 优先，单测需人工确认（最高优先级，违反必返工）
 
@@ -114,13 +123,39 @@ def _unittest_hint(cfg: ProjectConfig) -> str:
 """
 
 
+def _go_e2e_first_hint(cfg: ProjectConfig) -> str:
+    """Go 专用 E2E-first 纪律：优先写集成测试（启动 HTTP server 走真实链路），
+    纯单测（直接调函数、注入 mock/内存依赖）必须声明等待人工确认。"""
+    return f"""
+## 覆盖来源铁律（Go）：E2E/集成测试优先，单测需人工确认（最高优先级，违反必返工）
+
+**默认必须写 E2E/集成测试覆盖目标函数**：通过应用的真实 HTTP 入口（如 `httptest.NewServer`/
+`gin` 路由 + 真实 handler）发起请求走完整链路，验证返回。纯单测（直接实例化对象、
+注入内存/mock 依赖、`t *testing.T` 直调方法）**只允许**用于 gap 根因明确为
+**N1/N3/N5（需要特定环境/错误路径/死代码等）** 且确认无法通过 HTTP 集成触达的函数。
+
+**单测覆盖必须人工确认**：每一个纯单测覆盖的目标函数，都必须写进 manifest 的
+`unit_confirm_required` 字段（数组，每项 {{"file","function","evidence"}}），
+`evidence` 说明为什么该函数集成/e2e 不可达（引用源码证据）。未列入该字段的纯单测视为无效。
+能通过 HTTP 集成触达的函数（N4/N6）**一律走集成测试**，不许用纯单测。
+
+判定依据：测试函数体内若出现 `httptest.`/`http.NewServer`/`gin.New`/`localhost` 等网络信号
+判定为 E2E/集成；否则判定为纯单测。请在 manifest 里如实声明。
+"""
+
+
 def _gen_write_instruction(cfg: ProjectConfig) -> str:
     """Language-aware instruction for where/how gen-agent writes test cases."""
     if getattr(cfg, "language", "c") == "go":
+        go_e2e_note = (
+            f"【覆盖来源】优先写 E2E/集成测试（httptest/gin 起 server 走真实链路）；"
+            f"若某函数必须用纯单测（直接调函数），务必在 manifest.unit_confirm_required 声明并写明证据。"
+            if cfg.e2e_first else ""
+        )
         return (
-            f"生成/修复 Go 表驱动测试文件到源码包目录（文件名 *_test.go，与包同目录），"
+            f"生成/修复 Go 测试文件到源码包目录（文件名 *_test.go，与包同目录），"
             f"放在被测源码包旁边（如 src/foo/foo_test.go），用 go test 的标准测试函数"
-            f"(func TestXxx(t *testing.T))。不要用 pytest/harness。"
+            f"(func TestXxx(t *testing.T))。不要用 pytest/harness。{go_e2e_note}"
         )
     if cfg.e2e_first and cfg.language != "go":
         return (
@@ -222,7 +257,9 @@ def _confirm_unit_coverage(cfg: ProjectConfig, manifest: dict,
         dict {file, function, evidence, confirmed}.
     """
     declared = manifest.get("unit_confirm_required") or []
-    if not declared:
+    is_go = getattr(cfg, "language", "c") == "go"
+    auto_unit = _go_unit_tests(cfg, manifest) if (is_go and cfg.e2e_first) else []
+    if not declared and not auto_unit:
         return {"confirmed": [], "pending": [], "declared": []}
     if not cfg.require_unit_confirm:
         # governance off: treat all declared as confirmed without human review
@@ -246,7 +283,41 @@ def _confirm_unit_coverage(cfg: ProjectConfig, manifest: dict,
             item["confirmed"] = ans in ("y", "yes")
         # non-interactive default: not confirmed -> pending
         (confirmed if item["confirmed"] else pending).append(item)
+
+    # Go auto-detection: even if gen forgot to declare, statically classify the generated
+    # *_test.go files; any pure-unit test (no HTTP/net signal) is a coverage source that
+    # needs human confirmation under the Go E2E-first discipline.
+    for ut in auto_unit:
+        item = dict(ut, confirmed=False)
+        loc = f"{ut.get('file', '?')}::{ut.get('function', '?')}"
+        if interactive:
+            print(f"\n  ⚠️ [单测人工确认] Go 纯单测覆盖（无 e2e 信号）函数 {loc}")
+            if ut.get("evidence"):
+                print(f"     证据：{ut['evidence']}")
+            ans = input("     此函数仅被纯单测覆盖，确认接受该单测覆盖? [y/N] ").strip().lower()
+            item["confirmed"] = ans in ("y", "yes")
+        (confirmed if item["confirmed"] else pending).append(item)
+
     return {"confirmed": confirmed, "pending": pending, "declared": declared}
+
+
+def _go_unit_tests(cfg: ProjectConfig, manifest: dict) -> list[dict]:
+    """Auto-classify the manifest's *_test.go files, returning pure-unit test functions
+    (no E2E signal). Used by the Go E2E-first gate when gen forgot to declare coverage
+    sources in manifest.unit_confirm_required."""
+    test_files = manifest.get("test_files") or []
+    if not test_files or not any(str(f).endswith("_test.go") for f in test_files):
+        return []
+    from .go_test_scope import scan_go_test_sources
+    # scan is keyed by test-function name across the whole source tree; filter to the
+    # manifest's own files so we only gate on newly generated tests.
+    own = {str(f) for f in test_files}
+    out: list[dict] = []
+    for _name, tf in scan_go_test_sources(cfg.source_path).items():
+        if tf.file in own and tf.source == "unit":
+            out.append({"file": tf.file, "function": tf.name,
+                        "evidence": "纯单测：测试函数无 HTTP/网络 e2e 信号，直接调用对象方法"})
+    return out
 
 
 def _prompt_verify(cfg: ProjectConfig, run_id: str, iter_n: int, iter_dir: Path,
@@ -254,8 +325,10 @@ def _prompt_verify(cfg: ProjectConfig, run_id: str, iter_n: int, iter_dir: Path,
     files = manifest.get("test_files", [])
     is_go = getattr(cfg, "language", "c") == "go"
     lang_note = (
-        "审查对象是 Go *_test.go 测试函数（func TestXxx(t *testing.T)），"
-        "检查表驱动用例是否真实覆盖目标函数、断言是否正确。"
+        "审查对象是 Go *_test.go 测试函数（func TestXxx(t *testing.T)）。"
+        "【E2E-first】检查用例是否优先走 e2e/集成（httptest/gin 起 server 走真实链路）；"
+        "对 manifest.unit_confirm_required 或纯单测（无 HTTP/网络信号）覆盖的函数，"
+        "确认其确属 e2e 不可达（N1/N3/N5）且证据充分，否则提出修复。"
         if is_go else
         "测试目录：$AICOV_TEST_DIR = 测试目录见环境变量\nharness：见环境变量 AICOV_TEST_DIR 下 lib/harness.py"
     )

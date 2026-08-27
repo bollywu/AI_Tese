@@ -194,6 +194,8 @@ your-project/
 
 **E2E 优先覆盖治理 + 单测人工确认（2026-08-27）**：所有覆盖必须先通过 E2E 实现；确实无法 E2E 触达、必须用单测覆盖的函数，需**显式人工确认**后才算数。gen-agent 把每个单测覆盖函数声明进 `manifest.unit_confirm_required`（含"为何 e2e 不可达"的证据）；闭环运行人工确认门禁（交互模式逐函数 y/n；CI 可用 `unit_confirm_auto_yes` 自动放行）；最终报告列出所有**待人工确认**的单测覆盖。可在 `[coverage]` 配置：`e2e_first`、`require_unit_confirm`、`unit_confirm_auto_yes`。
 
+**Go 项目同样遵循 E2E-first**：gen 必须优先写集成测试（`httptest`/`gin` 起 server 走真实 HTTP 链路），纯单测（直接调方法、注入内存/mock 依赖）需人工确认。`aicoverage/go_test_scope.py` 静态判定每个 `*_test.go` 测试函数为 `e2e`（有 HTTP/网络信号）或 `unit`（无网络信号）；即使 gen 忘了声明，闭环也会自动识别纯单测并纳入人工确认门禁。
+
 **稳定性优化（工程化加固）**：
 - **链接失败自愈**：`compile_unit_driver` 遇到 `undefined reference`（缺库）时自动逐个尝试常见库（`-lm`/`-lpthread`/`-lrt`/`-ldl`/`-lz`），成功即用；全部失败则提示在 `[unittest] link_libs` 补全
 - **driver 崩溃识别**：`run_driver` 捕获被信号终止（如 SIGSEGV）的 driver，明确提示是 driver 参数构造问题还是被测函数真实缺陷
