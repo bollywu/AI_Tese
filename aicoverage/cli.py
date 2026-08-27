@@ -35,10 +35,10 @@ def main() -> int:
 
     p_init = sub.add_parser("init", help="在目标项目生成配置与测试脚手架")
     p_init.add_argument("--source", required=True, help="被测项目源码根目录")
-    p_init.add_argument("--build-cmd", required=True, help="插桩构建命令（须含 --coverage）")
-    p_init.add_argument("--binary", required=True, help="构建产物路径（相对源码根）")
+    p_init.add_argument("--build-cmd", default=None, help="插桩构建命令（须含 --coverage；Go 项目可省略）")
+    p_init.add_argument("--binary", default=None, help="构建产物路径（相对源码根；Go 项目可省略）")
     p_init.add_argument("--name", default=None, help="项目名（默认取目录名）")
-    p_init.add_argument("--language", default="c", choices=["c", "cpp"])
+    p_init.add_argument("--language", default="c", choices=["c", "cpp", "go"])
 
     p_build = sub.add_parser("build", help="插桩构建 + .gcno 校验")
     p_build.add_argument("--skip-clean", action="store_true")
@@ -150,6 +150,9 @@ def _cmd_init(args) -> int:
 # ── build / coverage ────────────────────────────────────────────────
 
 def _cmd_build(cfg: ProjectConfig, args) -> int:
+    if cfg.language == "go":
+        print("✅ Go 项目无需插桩构建——go test -coverprofile 原生采集覆盖率")
+        return 0
     from .build import build as do_build
 
     result = do_build(cfg, skip_clean=args.skip_clean)
@@ -168,9 +171,14 @@ def _cmd_coverage(cfg: ProjectConfig, args) -> int:
     if args.run_tests:
         from .executor import run_tests
         exec_result = run_tests(cfg, cfg.workspace / "standalone")
-        print(f"pytest: verdict={exec_result.verdict} tests={exec_result.tests} "
+        print(f"test: verdict={exec_result.verdict} tests={exec_result.tests} "
               f"fail={exec_result.failures} ({exec_result.duration_s:.1f}s)")
         cov_path = exec_result.coverage_path
+    elif cfg.language == "go":
+        # Go coverage only exists after running `go test -coverprofile`; there is no
+        # static collection path (unlike gcov's .gcno inventory baseline).
+        print("⚠️ Go 项目必须先跑测试才能采集覆盖率，请加 --run-tests")
+        return 1
     else:
         clean_gcda(cfg.source_path)
         report = gcov_collect(cfg.source_path, cfg.gcov_bin,

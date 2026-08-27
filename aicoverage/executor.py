@@ -106,6 +106,154 @@ def run_tests(
     collect_coverage: bool = True,
     python: str | None = None,
 ) -> ExecutionResult:
+    """Run tests then collect coverage, writing artifacts to iter_dir.
+
+    Dispatches by language:
+      - C/C++: pytest subprocess + junit.xml + gcov collection
+      - Go:    `go test -coverprofile=...` + coverprofile collection
+
+    Args:
+        test_files: run only the given test files (targeted verification after gen); None = full test_dir.
+        collect_coverage: whether to run coverage collection after execution.
+    """
+    if getattr(cfg, "language", "c") == "go":
+        return run_go_tests(cfg, iter_dir, timeout=timeout, collect_coverage=collect_coverage)
+    return _run_c_tests(cfg, iter_dir, test_files=test_files, timeout=timeout,
+                        collect_coverage=collect_coverage, python=python)
+
+
+def run_go_tests(
+    cfg: ProjectConfig,
+    iter_dir: Path,
+    *,
+    timeout: int | None = None,
+    collect_coverage: bool = True,
+) -> ExecutionResult:
+    """Run `go test -coverprofile=...` over the configured packages, then collect Go coverage.
+
+    Go's toolchain instruments and reports statement coverage natively; no separate
+    build step / binary is required. Artifacts mirror the C/C++ contract:
+      execution.json, <log>.log, coverage.json (CoverageReport via go_cover.collect_go).
+    """
+    result = ExecutionResult(verdict="BLOCKED")
+    iter_dir.mkdir(parents=True, exist_ok=True)
+    log_path = iter_dir / "gotest.log"
+    coverage_path = iter_dir / "coverage.json"
+
+    timeout = timeout or cfg.test_timeout
+    assert timeout > 0, "test.timeout 必须为正数"
+
+    go_bin = getattr(cfg, "go_bin", "go") or "go"
+    coverprofile = cfg.coverprofile
+    coverprofile.parent.mkdir(parents=True, exist_ok=True)
+    # Remove stale profile so a failed run doesn't leave old data.
+    if coverprofile.exists():
+        coverprofile.unlink()
+
+    # -v surfaces per-test `--- PASS/FAIL` lines so test counts are meaningful.
+    cmd = [go_bin, "test", "-v", "-coverprofile", str(coverprofile)]
+    tags = getattr(cfg, "go_build_tags", "") or ""
+    if tags:
+        cmd += ["-tags", tags]
+    cmd += list(getattr(cfg, "go_packages", ["./..."]))
+
+    import time
+    start = time.time()
+    try:
+        proc = subprocess.run(
+            cmd, cwd=str(cfg.source_path), capture_output=True, text=True,
+            timeout=timeout, env=_build_env(cfg),
+        )
+        log = (proc.stdout or "") + ("\n[stderr]\n" + proc.stderr if proc.stderr else "")
+        rc = proc.returncode
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        log = f"TIMEOUT after {timeout}s\n{out}"
+        rc = 124
+    result.duration_s = time.time() - start
+    log_path.write_text(log, encoding="utf-8")
+    result.log_path = log_path
+
+    # Parse Go test output: "ok <pkg> <dur>" / "FAIL <pkg>" lines; count tests.
+    passed, failed = _parse_go_test_output(log)
+    result.tests = passed + failed
+    result.failures = failed
+
+    if collect_coverage and coverprofile.exists():
+        from .go_cover import collect_go
+        report = collect_go(
+            cfg.source_path, coverprofile,
+            include_filter=cfg.include_globs, exclude_filter=cfg.exclude_globs,
+        )
+        report.save(coverage_path)
+        result.coverage_path = coverage_path
+
+    # Verdict: Go exits nonzero on any test failure (both env errors and case fails).
+    if rc == 124:
+        result.verdict = "BLOCKED"
+        result.failure_kind = "timeout_blocked"
+        result.detail = f"go test 超过 {timeout}s 被强制终止"
+    elif rc == 0:
+        result.verdict = "PASS"
+    elif _go_env_blocked(log):
+        result.verdict = "BLOCKED"
+        result.failure_kind = "env_blocked"
+        result.detail = "go test 未正常执行（编译/环境错误）"
+    else:
+        result.verdict = "FAIL"
+        result.failure_kind = "case_fail"
+
+    (iter_dir / "execution.json").write_text(
+        __import__("json").dumps(result.to_dict(), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return result
+
+
+def _parse_go_test_output(log: str) -> tuple[int, int]:
+    """Extract (passed, failed) test counts from `go test -v`-style output.
+
+    Falls back to the package `ok`/`FAIL` summary when verbose names are absent.
+    """
+    passed = 0
+    failed = 0
+    for line in log.splitlines():
+        line = line.strip()
+        # verbose per-test result lines look like:  === RUN / --- PASS: / --- FAIL:
+        if line.startswith("--- PASS:"):
+            passed += 1
+        elif line.startswith("--- FAIL:"):
+            failed += 1
+        elif line.startswith("PASS") or line.startswith("FAIL"):
+            # package summary; ignore (already counted via --- lines when -v is used)
+            pass
+    if passed == 0 and failed == 0:
+        # Not verbose: approximate by counting package-level failures.
+        failed = sum(1 for ln in log.splitlines() if ln.startswith("FAIL"))
+    return passed, failed
+
+
+def _go_env_blocked(log: str) -> bool:
+    """Heuristic: Go compile/build errors indicate an environment problem, not a test failure."""
+    markers = ["build failed", "cannot find package", "no required module provides package",
+               "package .* is not in std", "compile:", "[build failed]",
+               "setup failed", "could not import"]
+    import re
+    for mk in markers:
+        if re.search(mk, log):
+            return True
+    return False
+
+
+def _run_c_tests(
+    cfg: ProjectConfig,
+    iter_dir: Path,
+    *,
+    test_files: list[Path] | None = None,
+    timeout: int | None = None,
+    collect_coverage: bool = True,
+    python: str | None = None,
+) -> ExecutionResult:
     """Run pytest (defaults to the whole test_dir), then collect gcov coverage and write artifacts.
 
     Args:

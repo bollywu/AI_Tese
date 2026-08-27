@@ -2,14 +2,14 @@
 
 > **🌐 Language / 语言切换**: [English](README.md) · [中文（简体）](README_zh.md)
 
-An automated **test-coverage closure loop for any C/C++ project**: **requirement parsing → test generation → local execution → gcov coverage analysis → iterative gap-filling**, until function/branch coverage meets the threshold or early-stop triggers.
+An automated **test-coverage closure loop for C/C++ and Go projects**: **requirement parsing → test generation → local execution → coverage analysis → iterative gap-filling**, until function/line coverage meets the threshold or early-stop triggers. C/C++ uses gcov (`--coverage`); Go uses the native `go test -coverprofile` backend.
 
 > **Acknowledgements**: The call-graph analysis, incremental scanning, knowledge-base construction, and Agent orchestration of this project benefit respectively from [codegraph](https://github.com/colbymchenry/codegraph) (colbymchenry), [open-code-review](https://github.com/alibaba/open-code-review) (Alibaba), [wikirize](https://github.com/tmih06/wikirize) (tmih06), and the **Tencent CodeBuddy team** ([Agent SDK](https://www.codebuddy.ai)). Full credits are listed in the "Third-party open-source dependencies and acknowledgements" section at the end.
 
 ## Core Features
 
 - **Out-of-the-box**: drop a single `aicoverage.toml` into your target project root to integrate; supports both CLI programs and "library + driver" projects
-- **Fully local execution**: gcc `--coverage` instrumented build → pytest execution → gcov JSON collection, all done by local subprocesses
+- **Fully local execution**: C/C++ — gcc `--coverage` instrumented build → pytest → gcov JSON collection; Go — `go test -coverprofile` statement coverage; all done by local subprocesses
 - **Determinism-first**: build/execution/coverage computation/report assembly are all pure Python; the LLM only makes single-point semantic decisions (generate/review/attribute/scan/adjudicate), with zero hallucination in the execution phase
 - **Multi-Agent division of labor**: analyzer (requirement parsing) / coverage (gap root-cause classification N1-N6) / gen (test generation) / verify (static review) / quality (failure attribution) / scan (incremental scan) / kb (knowledge-base construction)
 - **MR incremental dual-track loop**: diff extraction (CodeGraph line-range attribution) → call-chain clustering in batches → incremental coverage target + code scanning. The scan track prefers [open-code-review](https://github.com/alibaba/open-code-review) (Alibaba's open-source AI code review, `ocr review --format json`), falling back to the built-in scan-agent when not configured; issues found are auto-converted into reproduction tests and adjudicated in four states (confirmed / false_positive / inconclusive / unobservable)
@@ -84,6 +84,27 @@ aicov report --list
 aicov report LOOP_20260821_160000
 ```
 
+### Go projects
+
+For Go there is no `--coverage` build or binary: the Go toolchain instruments
+natively via `go test -coverprofile`, so the workflow skips the build stage and
+drives coverage from statement-level coverprofile data.
+
+```bash
+# 1. Generate a Go config (no --build-cmd / --binary needed)
+aicov init --source /path/to/your-go-module --language go
+
+# 2. Optionally tune the [go] section: packages (default ./...), build_tags, coverprofile
+#    package = "./..." runs every package under the module.
+
+# 3. Collect coverage (must run tests first — Go has no static collection path)
+aicov coverage --run-tests
+
+# 4. Full loop: gen-agent writes *_test.go next to the source packages; `go test`
+#    discovers them natively; coverage closes via coverprofile.
+aicov loop --yes
+```
+
 ## Final Report Contents
 
 `runs/<run_id>/loop_final_report.md` is assembled by `finalreport.py` from all on-disk artifacts (layout only, no inference), with six sections:
@@ -147,11 +168,12 @@ The report follows the classic drill-down form of mainstream coverage tools (ifr
 
 | Section | Field | Description |
 |---------|-------|-------------|
-| `[project]` | name / language | project name; `c` or `cpp` |
-| `[source]` | path / include_globs / exclude_globs | source root; file globs to include in statistics |
-| `[build]` | clean_cmd / build_cmd / binary | build command (**must contain `--coverage` instrumentation**; `.gcno` generation is verified after build); artifact path |
-| `[test]` | dir / python / timeout | pytest dir; interpreter (auto=probe); overall timeout (>0) |
-| `[coverage]` | gcov_bin / func_target / cond_target | gcov executable; threshold lines |
+| `[project]` | name / language | project name; `c`, `cpp`, or `go` |
+| `[source]` | path / include_globs / exclude_globs | source root; file globs to include in statistics (Go defaults to `**/*.go`) |
+| `[build]` | clean_cmd / build_cmd / binary | build command (**must contain `--coverage` instrumentation**; `.gcno` generation is verified after build); artifact path — **not required for Go** |
+| `[go]` | go_bin / packages / build_tags / coverprofile | Go backend: `go` executable; test packages (default `./...`); extra `-tags`; coverprofile output path |
+| `[test]` | dir / python / timeout | pytest dir (C/C++); interpreter (auto=probe); overall timeout (>0) |
+| `[coverage]` | gcov_bin / func_target / cond_target | gcov executable (C/C++ only); threshold lines |
 | `[loop]` | max_iter / no_progress_stop | max iterations; consecutive no-growth rounds (early stop) |
 | `[llm]` | model / gen_model / max_turns / max_verify_retry | model configuration; max_turns=per-agent max tool turns (≥120 for complex projects); max_verify_retry=verify fix-loop rounds (3 recommended for complex projects) |
 | `[knowledge]` | kb_dir / badcase_dir / few_shots_dir / prompts_dir | project-specific knowledge resources; prompts_dir can fully override built-in prompts |
@@ -228,9 +250,10 @@ AIcoverage/
 ├── aicoverage/
 │   ├── config.py         # ProjectConfig (aicoverage.toml)
 │   ├── build.py          # instrumented build + .gcno verification
-│   ├── gcov.py           # gcov -i -b JSON parsing → CoverageReport
-│   ├── executor.py       # deterministic pytest execution + junit + execution.json
-│   ├── source.py         # C/C++ function list (ctags-first/regex fallback)
+│   ├── gcov.py           # gcov -i -b JSON parsing → CoverageReport (C/C++)
+│   ├── go_cover.py       # `go test -coverprofile` parsing → CoverageReport (Go)
+│   ├── executor.py       # deterministic test execution + junit/execution.json (pytest & go test)
+│   ├── source.py         # C/C++/Go function list (ctags-first/regex fallback)
 │   ├── runner.py         # AgentRunner (SDK, lazy import)
 │   ├── agent_call.py     # failure classification/backoff/hallucination detection/summary restart
 │   ├── hooks.py          # security hooks (dangerous commands/out-of-bounds writes/role-based write whitelist)

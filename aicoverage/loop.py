@@ -30,7 +30,7 @@ from .agent_call import call_agent
 from .build import build as do_build
 from .config import ProjectConfig
 from .docstyle import check_test_docstrings
-from .executor import run_tests
+from .executor import run_go_tests, run_tests
 from .gcov import CoverageReport, collect as gcov_collect
 from .runner import AgentRunner
 
@@ -102,6 +102,19 @@ def _unittest_hint(cfg: ProjectConfig) -> str:
 """
 
 
+def _gen_write_instruction(cfg: ProjectConfig) -> str:
+    """Language-aware instruction for where/how gen-agent writes test cases."""
+    if getattr(cfg, "language", "c") == "go":
+        return (
+            f"生成/修复 Go 表驱动测试文件到源码包目录（文件名 *_test.go，与包同目录），"
+            f"放在被测源码包旁边（如 src/foo/foo_test.go），用 go test 的标准测试函数"
+            f"(func TestXxx(t *testing.T))。不要用 pytest/harness。"
+        )
+    return (
+        f"生成/修复 pytest 用例到 {cfg.test_dir}/（文件名 test_<主题>_<序号>.py）"
+    )
+
+
 def _prompt_gen(cfg: ProjectConfig, run_id: str, iter_n: int, iter_dir: Path,
                 gap_items: list[dict], plan_summary: str,
                 quality_actions: list[dict] | None,
@@ -118,7 +131,7 @@ def _prompt_gen(cfg: ProjectConfig, run_id: str, iter_n: int, iter_dir: Path,
     return f"""生成第 {iter_n} 轮测试用例（run_id={run_id}）。
 
 被测项目：{cfg.display_name}（{cfg.language}），源码根 $AICOV_SRC = {cfg.source_path}
-被测二进制：$AICOV_BINARY = {cfg.binary_path}
+{'被测二进制：$AICOV_BINARY = ' + str(cfg.binary_path) if cfg.language != 'go' and cfg.binary_path else '（Go 项目：无需插桩二进制，由 go test -coverprofile 原生采集）'}
 测试目录：$AICOV_TEST_DIR = {cfg.test_dir}
 harness 原子函数库：{cfg.tests_lib_dir / "harness.py"}（先 Read 它！）
 {wiki_navigation_hint(cfg)}{badcase_hint(cfg)}
@@ -129,10 +142,10 @@ harness 原子函数库：{cfg.tests_lib_dir / "harness.py"}（先 Read 它！�
 ## 任务
 1. Read harness.py 了解可用原子函数（缺什么先补什么）
 2. Read 目标函数源码，断言预期值必须来自源码真实逻辑
-3. 生成/修复 pytest 用例到 {cfg.test_dir}/（文件名 test_<主题>_<序号>.py）
+3. {_gen_write_instruction(cfg)}
 4. 写 manifest → {manifest_path}
 
-遵守原子函数搭积木铁律。绝不执行 pytest。"""
+遵守原子函数搭积木铁律。绝不执行 pytest / go test。"""
 
 
 def _prompt_gen_fix(cfg: ProjectConfig, iter_dir: Path, problems: list[dict],
@@ -155,8 +168,11 @@ def _snapshot_manifest_files(cfg: ProjectConfig, manifest: dict) -> dict[str, st
     """
     import hashlib
     snap: dict[str, str] = {}
+    base = cfg.source_path if cfg.language == "go" else cfg.test_dir
     for f in manifest.get("test_files", []):
-        p = cfg.test_dir / f
+        p = Path(f)
+        if not p.is_absolute():
+            p = base / p
         try:
             snap[str(f)] = hashlib.sha1(p.read_bytes()).hexdigest()
         except OSError:
@@ -173,25 +189,33 @@ def _has_fix_progress(before: dict[str, str], after: dict[str, str],
     return any(before.get(f) != after.get(f) for f in before)
 
 
-def _prompt_verify(run_id: str, iter_n: int, iter_dir: Path,
+def _prompt_verify(cfg: ProjectConfig, run_id: str, iter_n: int, iter_dir: Path,
                    manifest: dict) -> str:
     files = manifest.get("test_files", [])
+    is_go = getattr(cfg, "language", "c") == "go"
+    lang_note = (
+        "审查对象是 Go *_test.go 测试函数（func TestXxx(t *testing.T)），"
+        "检查表驱动用例是否真实覆盖目标函数、断言是否正确。"
+        if is_go else
+        "测试目录：$AICOV_TEST_DIR = 测试目录见环境变量\nharness：见环境变量 AICOV_TEST_DIR 下 lib/harness.py"
+    )
     return f"""静态审查本轮生成的用例（run_id={run_id} iter={iter_n}）。
 
-测试目录：$AICOV_TEST_DIR = 测试目录见环境变量
 manifest 声明的文件：{json.dumps(files, ensure_ascii=False)}
-harness：见环境变量 AICOV_TEST_DIR 下 lib/harness.py
+{lang_note}
 
 逐文件按 V1-V5 清单审查，产出 → {iter_dir / "verify_report.json"}"""
 
 
 def _prompt_quality(run_id: str, iter_n: int, iter_dir: Path,
-                    execution: dict, known_badcases: str = "") -> str:
+                    execution: dict, known_badcases: str = "",
+                    *, is_go: bool = False) -> str:
+    log_ref = (iter_dir / "gotest.log") if is_go else (iter_dir / "pytest.log")
+    junit_ref = "" if is_go else f"junit：{iter_dir / 'junit.xml'}\n"
     return f"""分析本轮执行失败（run_id={run_id} iter={iter_n}）。
 
 执行结果：{json.dumps(execution, ensure_ascii=False, indent=1)}
-junit：{iter_dir / "junit.xml"}
-pytest 日志：{iter_dir / "pytest.log"}
+{junit_ref}测试日志：{log_ref}
 覆盖率：{iter_dir / "coverage.json"}
 测试目录/harness/源码路径：见环境变量 AICOV_TEST_DIR / AICOV_SRC
 {known_badcases}
@@ -297,7 +321,12 @@ async def run_loop(
                  data={"success": res.success, "plan": bool(plan)})
 
     # ── [1] Instrumented build ──────────────────────────────────
-    if skip_build:
+    # Go is instrumented natively by `go test -coverprofile`; no --coverage build
+    # step (or binary) exists, so the build stage is skipped entirely.
+    is_go = getattr(cfg, "language", "c") == "go"
+    if is_go:
+        print("▶ [1] 插桩构建（跳过——Go 由 go test -coverprofile 原生插桩）")
+    elif skip_build:
         print("▶ [1] 插桩构建（跳过——调用方保证二进制已是最新插桩版本）")
     else:
         print("▶ [1] 插桩构建")
@@ -316,18 +345,33 @@ async def run_loop(
     # ── [2] Baseline coverage ───────────────────────────────────
     baseline_dir = run_dir / "iter_0"
     baseline_dir.mkdir(parents=True, exist_ok=True)
-    existing_tests = list(cfg.test_dir.glob("test_*.py")) if cfg.test_dir.exists() else []
+    if cfg.language == "go":
+        # Go tests are *_test.go colocated with source packages; `go test` discovers
+        # them natively (no tests/ dir needed).
+        existing_tests = [
+            p for p in cfg.source_path.rglob("*_test.go")
+            if p.is_file()
+        ]
+    else:
+        existing_tests = list(cfg.test_dir.glob("test_*.py")) if cfg.test_dir.exists() else []
     print(f"▶ [2] 基线覆盖率（已有用例 {len(existing_tests)} 个）")
     if existing_tests:
         exec0 = run_tests(cfg, baseline_dir)
         baseline_cov_path = baseline_dir / "coverage.json"
     else:
         exec0 = None
-        baseline_cov = gcov_collect(
-            cfg.source_path, cfg.gcov_bin,
-            include_filter=cfg.include_globs, exclude_filter=cfg.exclude_globs)
         baseline_cov_path = run_dir / "baseline_coverage.json"
-        baseline_cov.save(baseline_cov_path)
+        if cfg.language == "go":
+            # Go has no gcov; run `go test -coverprofile` once to get the empty baseline.
+            go_res = run_go_tests(cfg, baseline_dir)
+            baseline_cov_path = baseline_dir / "coverage.json"
+            if not go_res.coverage_path:
+                print("  ⚠️ go test 未产出 coverprofile，基线的函数清单为空")
+        else:
+            baseline_cov = gcov_collect(
+                cfg.source_path, cfg.gcov_bin,
+                include_filter=cfg.include_globs, exclude_filter=cfg.exclude_globs)
+            baseline_cov.save(baseline_cov_path)
     baseline_report = CoverageReport.load(baseline_cov_path)
     previous: CoverageReport | None = None
     print(f"  基线：func={baseline_report.func_pct:.2f}% cond={baseline_report.cond_pct:.2f}%")
@@ -473,13 +517,16 @@ async def run_loop(
         for attempt in range(1 + limits["max_verify_retry"]):
             obs.emit("stage.enter", run_id, iter_n=iter_n, stage="verify", runs_dir=runs_dir)
             await _call("verify-agent",
-                        _prompt_verify(run_id, iter_n, iter_dir, manifest),
+                        _prompt_verify(cfg, run_id, iter_n, iter_dir, manifest),
                         iter_dir, iter_n, "verify", retries=1)
             report = _read_json(iter_dir / "verify_report.json") or {
                 "verdict": "fail", "problems": [],
                 "summary": "verify-agent 未产出报告",
             }
-            doc_problems = check_test_docstrings(cfg.test_dir, manifest.get("test_files", []))
+            # Docstring header gate is pytest-specific; Go test functions have no
+            # docstrings, so it is skipped for Go projects.
+            doc_problems = ([] if cfg.language == "go"
+                            else check_test_docstrings(cfg.test_dir, manifest.get("test_files", [])))
             if doc_problems:
                 report["problems"] = list(report.get("problems", [])) + doc_problems
                 report["verdict"] = "fail"
@@ -552,7 +599,8 @@ async def run_loop(
             from .badcase import badcase_hint
             await _call("quality-agent",
                         _prompt_quality(run_id, iter_n, iter_dir, execution.to_dict(),
-                                        known_badcases=badcase_hint(cfg)),
+                                        known_badcases=badcase_hint(cfg),
+                                        is_go=(cfg.language == "go")),
                         iter_dir, iter_n, "quality", retries=1)
             quality = _read_json(iter_dir / "quality_report.json")
             obs.emit("stage.exit", run_id, iter_n=iter_n, stage="quality",

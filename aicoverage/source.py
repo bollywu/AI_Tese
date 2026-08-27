@@ -129,13 +129,29 @@ def extract_functions_ctags(source_root: Path, files: list[Path]) -> list[Functi
 
 
 def function_inventory(files: list[Path], source_root: Path) -> list[FunctionInfo]:
-    """Full function inventory: ctags first, regex as fallback."""
+    """Full function inventory: ctags first (C/C++), regex as fallback.
+
+    Go files are extracted with the Go-aware parser (go_cover.extract_go_functions)
+    since ctags/C-regex cannot parse Go's `func` syntax reliably.
+    """
     if not files:
         return []
-    via_ctags = extract_functions_ctags(source_root, files)
-    if via_ctags is not None:
-        return via_ctags
+    go_files = [p for p in files if p.suffix == ".go"]
+    c_files = [p for p in files if p.suffix != ".go"]
     results: list[FunctionInfo] = []
-    for p in files:
-        results.extend(extract_functions_source(p, source_root))
+    if go_files:
+        from .go_cover import extract_go_functions
+        for p in go_files:
+            for gf in extract_go_functions(p, source_root):
+                results.append(FunctionInfo(
+                    file=gf.file, name=gf.name, line=gf.start_line,
+                    signature=f"func {gf.name}",
+                ))
+    if c_files:
+        via_ctags = extract_functions_ctags(source_root, c_files)
+        if via_ctags is not None:
+            results.extend(via_ctags)
+        else:
+            for p in c_files:
+                results.extend(extract_functions_source(p, source_root))
     return results

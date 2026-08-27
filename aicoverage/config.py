@@ -24,7 +24,12 @@ CONFIG_ENV = "AICOV_CONFIG"
 DEFAULT_CONFIG_NAME = "aicoverage.toml"
 
 DEFAULT_INCLUDE_GLOBS = ["src/**/*.c", "src/**/*.cc", "src/**/*.cpp", "src/**/*.cxx"]
+DEFAULT_GO_INCLUDE_GLOBS = ["**/*.go"]
 DEFAULT_EXCLUDE_GLOBS = ["deps/**", "third_party/**", "tests/**"]
+
+# Source-file suffix sets per language (used by source_files() and others)
+_C_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hpp"}
+_GO_SUFFIXES = {".go"}
 
 
 class ConfigError(SystemExit):
@@ -81,6 +86,15 @@ class ProjectConfig:
     gcov_bin: str = "gcov"
     func_target: float = 100.0
     cond_target: float = 85.0
+
+    # ── Go coverage backend (only used when language == "go") ──
+    # Go's toolchain instruments natively via `go test -coverprofile`, so no
+    # --coverage build / binary is required. coverprofile_path is where the
+    # executor writes `go test -coverprofile` output (relative to source_path).
+    go_bin: str = "go"
+    go_packages: list[str] = field(default_factory=lambda: ["./..."])
+    go_build_tags: str = ""
+    coverprofile_path: str = ".aicoverage/cover.out"
 
     # ── Loop ──────────────────────────────────────────────────
     max_iter: int = 6
@@ -147,12 +161,14 @@ class ProjectConfig:
         to dataclass defaults so every field is present.
         """
         src = Path(source_path).expanduser().resolve()
+        include_globs = list(DEFAULT_GO_INCLUDE_GLOBS) if language == "go" else list(DEFAULT_INCLUDE_GLOBS)
         return cls(
             config_path=src / "aicoverage.toml",
             name=name or src.name,
             display_name=name or src.name,
             language=language,
             source_path=src,
+            include_globs=include_globs,
             build_cmd=build_cmd,
             binary=Path(binary) if binary else None,
             test_dirname=test_dirname,
@@ -201,6 +217,12 @@ class ProjectConfig:
         return p if p.is_absolute() else self.source_path / p
 
     @property
+    def coverprofile(self) -> Path:
+        """Go coverprofile output path (absolute; only used when language == 'go')."""
+        p = Path(self.coverprofile_path)
+        return p if p.is_absolute() else self.source_path / p
+
+    @property
     def effective_gen_model(self) -> str:
         return self.gen_model or self.model
 
@@ -209,10 +231,13 @@ class ProjectConfig:
         errors: list[str] = []
         if not self.source_path.is_dir():
             errors.append(f"source.path 不存在或不是目录: {self.source_path}")
-        if not self.build_cmd.strip():
-            errors.append("build.build_cmd 为空——必须提供插桩构建命令（含 --coverage）")
-        if self.binary is None:
-            errors.append("build.binary 为空——必须指定构建产物路径")
+        # Go is instrumented natively via `go test -coverprofile`; the --coverage
+        # build/binary contract only applies to C/C++ projects.
+        if self.language != "go":
+            if not self.build_cmd.strip():
+                errors.append("build.build_cmd 为空——必须提供插桩构建命令（含 --coverage）")
+            if self.binary is None:
+                errors.append("build.binary 为空——必须指定构建产物路径")
         if self.test_timeout <= 0:
             errors.append(f"test.timeout={self.test_timeout} 非法——必须为正数（秒）")
         return errors
@@ -229,9 +254,10 @@ class ProjectConfig:
             return list(self._source_files_cache)
         results: list[Path] = []
         if self.source_path.is_dir():
+            suffixes = _GO_SUFFIXES if self.language == "go" else _C_SUFFIXES
             all_files = [
                 p for p in self.source_path.rglob("*")
-                if p.is_file() and p.suffix in (".c", ".cc", ".cpp", ".cxx")
+                if p.is_file() and p.suffix in suffixes
             ]
             for p in sorted(all_files):
                 rel = p.relative_to(self.source_path).as_posix()
@@ -261,6 +287,11 @@ class ProjectConfig:
         env["AICOV_UT_COMPILER"] = getattr(self, "ut_compiler", "") or "gcc"
         env["AICOV_UT_FLAGS"] = " ".join(getattr(self, "ut_flags", ["-O0", "-g", "-Wall"]))
         env["AICOV_UT_LINK_LIBS"] = " ".join(getattr(self, "ut_link_libs", []))
+        # Go backend env (getattr fallback for old instances lacking these fields)
+        env["AICOV_GO_BIN"] = getattr(self, "go_bin", "go")
+        env["AICOV_GO_PACKAGES"] = " ".join(getattr(self, "go_packages", ["./..."]))
+        env["AICOV_GO_BUILD_TAGS"] = getattr(self, "go_build_tags", "")
+        env["AICOV_GO_COVERPROFILE"] = str(getattr(self, "coverprofile", self.source_path / ".aicoverage" / "cover.out"))
         if run_dir is not None:
             env["AICOV_RUN_DIR"] = str(run_dir)
         if iter_dir is not None:
@@ -298,6 +329,7 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
     codegraph = raw.get("codegraph", {})
     scan = raw.get("scan", {})
     unit = raw.get("unittest", {})
+    gosec = raw.get("go", {})
 
     source_path = Path(src.get("path", ".")).expanduser()
     if not source_path.is_absolute():
@@ -306,14 +338,19 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
     binary_raw = (build.get("binary") or "").strip()
     binary = Path(binary_raw).expanduser() if binary_raw else None
 
+    language = str(proj.get("language", "c")).lower()
+    if language not in ("c", "cpp", "go"):
+        raise ConfigError(f"❌ project.language 必须是 c / cpp / go，当前: {language!r}")
+    default_includes = DEFAULT_GO_INCLUDE_GLOBS if language == "go" else DEFAULT_INCLUDE_GLOBS
+
     cfg = ProjectConfig(
         config_path=path,
         name=str(proj.get("name") or path.parent.name),
         display_name=str(proj.get("display_name") or proj.get("name") or path.parent.name),
-        language=str(proj.get("language", "c")).lower(),
+        language=language,
         description=str(proj.get("description", "")),
         source_path=source_path,
-        include_globs=list(src.get("include_globs", DEFAULT_INCLUDE_GLOBS)),
+        include_globs=list(src.get("include_globs", default_includes)),
         exclude_globs=list(src.get("exclude_globs", DEFAULT_EXCLUDE_GLOBS)),
         clean_cmd=str(build.get("clean_cmd", "")).strip(),
         build_cmd=str(build.get("build_cmd", "")).strip(),
@@ -344,12 +381,13 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
         ut_flags=[str(x) for x in unit.get("flags", ["-O0", "-g", "-Wall"])] or ["-O0", "-g", "-Wall"],
         ut_link_libs=[str(x) for x in unit.get("link_libs", [])],
         ut_obj_dir=str(unit.get("obj_dir", ".aicoverage/ut")).strip() or ".aicoverage/ut",
+        go_bin=str(gosec.get("go_bin", "go")).strip() or "go",
+        go_packages=[str(x) for x in gosec.get("packages", ["./..."])] or ["./..."],
+        go_build_tags=str(gosec.get("build_tags", "")).strip(),
+        coverprofile_path=str(gosec.get("coverprofile", ".aicoverage/cover.out")).strip() or ".aicoverage/cover.out",
     )
     if cfg.scan_backend not in ("auto", "ocr", "agent", "off"):
         raise ConfigError(f"❌ scan.backend 必须是 auto/ocr/agent/off，当前: {cfg.scan_backend!r}")
-
-    if cfg.language not in ("c", "cpp"):
-        raise ConfigError(f"❌ project.language 必须是 c 或 cpp，当前: {cfg.language!r}")
 
     errors = cfg.validate()
     if errors:

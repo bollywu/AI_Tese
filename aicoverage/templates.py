@@ -81,6 +81,66 @@ backend = "auto"             # auto | ocr | agent | off
                               # auto: use ocr if available, else fall back to agent
 """
 
+# Go project config: no --coverage build / binary needed. `go test -coverprofile`
+# instruments and reports statement coverage natively, so the [build] section is
+# omitted and the [go] section drives the backend.
+CONFIG_TEMPLATE_GO = """\
+# AIcoverage project config -- Go coverage via `go test -coverprofile`
+# docs: https://github.com/yourorg/AIcoverage (example)
+[project]
+name = "{name}"
+display_name = "{name}"
+language = "go"
+description = ""
+
+[source]
+path = "."
+# Go source files included in coverage stats / function extraction
+include_globs = ["**/*.go"]
+exclude_globs = ["vendor/**", "third_party/**", "tests/**", "**/*_test.go"]
+
+[go]
+go_bin = "go"
+packages = ["./..."]
+build_tags = ""
+coverprofile = ".aicoverage/cover.out"
+
+[test]
+dir = "tests"          # Go test dir; pytest-style test_*.py not required
+timeout = 600
+
+[coverage]
+func_target = 100.0
+cond_target = 85.0
+
+[loop]
+max_iter = 6
+no_progress_stop = 2
+
+[llm]
+model = "your-model-name"  # required: model name supported by the Agent SDK
+gen_model = ""         # empty = same as model
+max_turns = 120
+max_verify_retry = 3
+
+[knowledge]            # all optional
+kb_dir = ""
+badcase_dir = ""
+few_shots_dir = ""
+prompts_dir = ""
+
+[guard]
+blocked_commands = []
+
+[codegraph]
+enabled = false
+index_dir = ".codegraph"
+entrypoints = ["main"]
+
+[scan]
+backend = "auto"
+"""
+
 CONFTEST_TEMPLATE = '''\
 """AIcoverage test scaffolding conftest (extendable per project)."""
 import os
@@ -478,8 +538,11 @@ def assert_duration_lt(res: ProcResult, seconds: float) -> None:
 def scaffold(source: Path, *, name: str, build_cmd: str, binary: str,
              language: str = "c") -> None:
     """Generate the config + tests/ harness scaffold in the target project."""
-    config = CONFIG_TEMPLATE.format(name=name, language=language,
-                                    build_cmd=build_cmd, binary=binary)
+    if language == "go":
+        config = CONFIG_TEMPLATE_GO.format(name=name)
+    else:
+        config = CONFIG_TEMPLATE.format(name=name, language=language,
+                                        build_cmd=build_cmd, binary=binary)
     (source / "aicoverage.toml").write_text(config, encoding="utf-8")
 
     tests = source / "tests"

@@ -2,14 +2,14 @@
 
 > **🌐 语言切换 / Language**：[中文（简体）](README_zh.md) · [English](README.md)
 
-面向**任意 C/C++ 项目**的自动化测试覆盖率闭环：**需求解析 → 测试生成 → 本地执行 → gcov 覆盖率分析 → 迭代补测**，直到函数/分支覆盖率达标或触发早停。
+面向 **C/C++ 与 Go 项目**的自动化测试覆盖率闭环：**需求解析 → 测试生成 → 本地执行 → 覆盖率分析 → 迭代补测**，直到函数/行覆盖率达标或触发早停。C/C++ 用 gcov（`--coverage`），Go 用原生 `go test -coverprofile` 后端。
 
 > **Acknowledgements / 致谢**：本项目的调用链分析、增量扫描、知识库构建与 Agent 编排，分别得益于 [codegraph](https://github.com/colbymchenry/codegraph)（colbymchenry）、[open-code-review](https://github.com/alibaba/open-code-review)（Alibaba）、[wikirize](https://github.com/tmih06/wikirize)（tmih06）与**腾讯 CodeBuddy 团队**（[Agent SDK](https://www.codebuddy.ai)）的开源贡献。完整清单见文末「[第三方开源依赖与致谢](#第三方开源依赖与致谢)」。
 
 ## 核心特性
 
 - **开箱即用**：一份 `aicoverage.toml` 放进目标项目根即可接入，支持 CLI 程序与"库 + 驱动程序"两种形态
-- **全本机运行**：gcc `--coverage` 插桩构建 → pytest 执行 → gcov JSON 采集，全部本地 subprocess 完成
+- **全本机运行**：C/C++ — gcc `--coverage` 插桩构建 → pytest 执行 → gcov JSON 采集；Go — `go test -coverprofile` 语句级覆盖；全部本地 subprocess 完成
 - **确定性优先**：构建/执行/覆盖率计算/报告拼装均为纯 Python 代码；LLM 只做单点语义决策（生成/审查/归因/扫描/裁决），执行环节零幻觉
 - **多 Agent 分工**：analyzer（需求解析）/ coverage（缺口根因分类 N1-N6）/ gen（用例生成）/ verify（静态审查）/ quality（失败归因）/ scan（增量扫描）/ kb（知识库构建）
 - **MR 增量双轨闭环**：diff 提取（CodeGraph 行区间归因）→ 调用链聚类分批 → 增量覆盖达标 + 代码扫描。扫描轨优先调用 [open-code-review](https://github.com/alibaba/open-code-review)（阿里开源 AI 代码审查，`ocr review --format json`），未配置时自动降级内置 scan-agent；扫描产出的问题自动生成复现用例并做四态裁决（confirmed / false_positive / inconclusive / unobservable）
@@ -82,6 +82,24 @@ aicov report --list
 aicov report LOOP_20260821_160000
 ```
 
+### Go 项目
+
+Go 没有 `--coverage` 构建或二进制：Go 工具链由 `go test -coverprofile` 原生插桩，因此闭环跳过构建阶段，直接基于 coverprofile 语句级覆盖数据。
+
+```bash
+# 1. 生成 Go 配置（无需 --build-cmd / --binary）
+aicov init --source /path/to/your-go-module --language go
+
+# 2.（可选）调整 [go] 段：packages（默认 ./...）、build_tags、coverprofile
+
+# 3. 采集覆盖率（必须先跑测试——Go 无静态采集路径）
+aicov coverage --run-tests
+
+# 4. 完整闭环：gen-agent 在源码包旁写 *_test.go，`go test` 原生发现它们，
+#    覆盖率经 coverprofile 迭代收敛。
+aicov loop --yes
+```
+
 ## 最终报告内容
 
 `runs/<run_id>/loop_final_report.md` 由 `finalreport.py` 汇总全部磁盘产物生成（只排版、不推断），包含六个章节：
@@ -146,11 +164,12 @@ aicov html --from-json path/to/coverage.json --out ./report
 
 | 段 | 字段 | 说明 |
 |----|------|------|
-| `[project]` | name / language | 项目名；`c` 或 `cpp` |
-| `[source]` | path / include_globs / exclude_globs | 源码根；参与统计的文件 glob |
-| `[build]` | clean_cmd / build_cmd / binary | 构建命令（**必须含 `--coverage` 插桩**，构建后会校验 `.gcno` 生成）；产物路径 |
-| `[test]` | dir / python / timeout | pytest 目录；解释器（auto=探测）；整体超时（>0） |
-| `[coverage]` | gcov_bin / func_target / cond_target | gcov 可执行文件；达标线 |
+| `[project]` | name / language | 项目名；`c`、`cpp` 或 `go` |
+| `[source]` | path / include_globs / exclude_globs | 源码根；参与统计的文件 glob（Go 默认 `**/*.go`） |
+| `[build]` | clean_cmd / build_cmd / binary | 构建命令（**必须含 `--coverage` 插桩**，构建后会校验 `.gcno` 生成）；产物路径 — **Go 项目不需要** |
+| `[go]` | go_bin / packages / build_tags / coverprofile | Go 后端：`go` 可执行文件；测试包（默认 `./...`）；额外 `-tags`；coverprofile 输出路径 |
+| `[test]` | dir / python / timeout | pytest 目录（C/C++）；解释器（auto=探测）；整体超时（>0） |
+| `[coverage]` | gcov_bin / func_target / cond_target | gcov 可执行文件（仅 C/C++）；达标线 |
 | `[loop]` | max_iter / no_progress_stop | 最大迭代；连续无增长轮数（早停） |
 | `[llm]` | model / gen_model / max_turns / max_verify_retry | 模型配置；max_turns=单次 agent 最大工具轮次（复杂项目建议 ≥120）；max_verify_retry=verify 失败修复回环次数（复杂项目建议 3） |
 | `[knowledge]` | kb_dir / badcase_dir / few_shots_dir / prompts_dir | 按项目自备的知识资源；prompts_dir 可整份覆盖内置 prompt |
@@ -227,9 +246,10 @@ AIcoverage/
 ├── aicoverage/
 │   ├── config.py         # ProjectConfig（aicoverage.toml）
 │   ├── build.py          # 插桩构建 + .gcno 校验
-│   ├── gcov.py           # gcov -i -b JSON 解析 → CoverageReport
-│   ├── executor.py       # 确定性 pytest 执行 + junit + execution.json
-│   ├── source.py         # C/C++ 函数清单（ctags 优先/正则兜底）
+│   ├── gcov.py           # gcov -i -b JSON 解析 → CoverageReport（C/C++）
+│   ├── go_cover.py       # `go test -coverprofile` 解析 → CoverageReport（Go）
+│   ├── executor.py       # 确定性测试执行 + junit/execution.json（pytest 与 go test）
+│   ├── source.py         # C/C++/Go 函数清单（ctags 优先/正则兜底）
 │   ├── runner.py         # AgentRunner（SDK，惰性导入）
 │   ├── agent_call.py     # 失败分类/退避/幻觉检测/摘要重启
 │   ├── hooks.py          # 安全 hooks（危险命令/越界写入/角色化写白名单）
@@ -259,7 +279,8 @@ AIcoverage/
 ## 环境要求
 
 - python ≥ 3.11（核心确定性阶段零第三方依赖）
-- gcc ≥ 9（`gcov -i` JSON 中间格式；gcc 12 起输出 gzip）
+- C/C++ 项目：gcc ≥ 9（`gcov -i` JSON 中间格式；gcc 12 起输出 gzip）
+- Go 项目：Go 工具链（`go test -coverprofile` 原生采集，无需 gcc/gcov）
 - LLM 阶段：`codebuddy-agent-sdk`（`pip install -e ".[agent]"`）+ 可用的 CodeBuddy 认证
 
 ## 第三方开源依赖与致谢
