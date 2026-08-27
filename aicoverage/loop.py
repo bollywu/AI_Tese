@@ -77,14 +77,27 @@ P0（N3/N4/N6）进 items（≤25 个），其余进 noise。"""
 
 
 def _unittest_hint(cfg: ProjectConfig) -> str:
-    """单测通道引导：当缺口根因是 e2e 不可达（N1/N3/N5）时，提示 gen-agent
-    走"直接调用目标函数"的单测通道，而不是死磕 run_binary 黑盒触发。"""
+    """单测通道引导：默认 e2e 优先；当缺口根因是 e2e 不可达（N1/N3/N5）时才允许
+    走"直接调用目标函数"的单测通道，且该单测覆盖必须声明到 manifest 的
+    unit_confirm_required 字段等待人工确认。"""
     cc = cfg.ut_compiler or "（跟随 build 体系，建议 gcc/g++）"
+    if not cfg.e2e_first:
+        return ""  # e2e-first 纪律关闭，不注入单测约束（保持旧行为）
     return f"""
-## 单测通道（e2e 不可达函数专用）
-若某 gap 根因是 **N1（特定运行环境/多进程/信号）、N3（错误路径）、N5（死代码/平台相关/无调用点）**，
-说明它难以/无法通过被测二进制 $AICOV_BINARY 的正常 E2E 流程触达。此时请走**单测通道**：
-1. 写一个 `test_driver_<主题>.c`（含 main），`#include` 或 extern 声明目标函数，直接调用它并打印返回值/副作用
+## 覆盖来源铁律：E2E 优先，单测需人工确认（最高优先级，违反必返工）
+
+**默认必须通过被测二进制 $AICOV_BINARY 的黑盒 E2E（run_binary）覆盖目标函数。**
+单测（compile_unit_driver/run_driver 直接调函数）**只允许**用于 gap 根因明确为
+**N1（特定运行环境/多进程/信号）、N3（错误路径）、N5（死代码/平台相关/无调用点）**
+且你读过源码后确认**无法通过任何 E2E 输入构造触达**的函数。
+
+**单测覆盖必须人工确认**：每一个通过单测通道覆盖的函数，都必须写进 manifest 的
+`unit_confirm_required` 字段（数组，每项 {{"file","function","evidence"}}），
+`evidence` 说明为什么该函数 e2e 不可达（引用源码证据）。未列入该字段的单测视为无效。
+能 E2E 触达的（N4/N6）**一律走 run_binary**，不许用单测。
+
+单测通道写法（N1/N3/N5 专用）：
+1. 写 `test_driver_<主题>.c`（含 main），`#include` 或 extern 声明目标函数，直接调用并打印返回值/副作用
 2. 用例体调 harness 原子函数：
    ```python
    res = compile_unit_driver("tests/drivers/test_driver_<主题>.c",
@@ -98,7 +111,6 @@ def _unittest_hint(cfg: ProjectConfig) -> str:
 3. driver 源文件放 `tests/drivers/`；单测二进制自动落 `{cfg.ut_obj_path}`（--coverage 插桩，
    gcov 采集天然兼容）。单测编译器：`{cc}`
 4. 若目标函数依赖项目私有结构体/宏，driver 里 `#include` 对应头文件即可（include_dirs 传头文件目录）。
-注意：单测只用于补 e2e 不可达的函数，能 E2E 触达的（N4/N6）仍优先 run_binary。
 """
 
 
@@ -109,6 +121,12 @@ def _gen_write_instruction(cfg: ProjectConfig) -> str:
             f"生成/修复 Go 表驱动测试文件到源码包目录（文件名 *_test.go，与包同目录），"
             f"放在被测源码包旁边（如 src/foo/foo_test.go），用 go test 的标准测试函数"
             f"(func TestXxx(t *testing.T))。不要用 pytest/harness。"
+        )
+    if cfg.e2e_first and cfg.language != "go":
+        return (
+            f"生成/修复 pytest 用例到 {cfg.test_dir}/（文件名 test_<主题>_<序号>.py）。"
+            f"【覆盖来源】默认走 e2e（run_binary 黑盒触发）；若某函数必须用单测"
+            f"(compile_unit_driver)，务必在 manifest.unit_confirm_required 声明并写明证据。"
         )
     return (
         f"生成/修复 pytest 用例到 {cfg.test_dir}/（文件名 test_<主题>_<序号>.py）"
@@ -189,6 +207,48 @@ def _has_fix_progress(before: dict[str, str], after: dict[str, str],
     return any(before.get(f) != after.get(f) for f in before)
 
 
+def _confirm_unit_coverage(cfg: ProjectConfig, manifest: dict,
+                           *, interactive: bool = False) -> dict:
+    """E2E-first human confirmation gate for unit-test coverage.
+
+    gen-agent declares every unit-test-covered function in manifest.unit_confirm_required
+    (list of {file, function, evidence}). This gate turns that declaration into an explicit
+    human confirmation:
+      - interactive: prompt y/n per function (default n -> strict, unconfirmed stays pending)
+      - non-interactive: auto-approve when unit_confirm_auto_yes, else all stay pending
+
+    Returns:
+        {"confirmed": [...], "pending": [...], "declared": [...]} where each item is a
+        dict {file, function, evidence, confirmed}.
+    """
+    declared = manifest.get("unit_confirm_required") or []
+    if not declared:
+        return {"confirmed": [], "pending": [], "declared": []}
+    if not cfg.require_unit_confirm:
+        # governance off: treat all declared as confirmed without human review
+        return {"confirmed": [dict(d, confirmed=True) for d in declared],
+                "pending": [], "declared": declared}
+    if not interactive and getattr(cfg, "unit_confirm_auto_yes", False):
+        return {"confirmed": [dict(d, confirmed=True) for d in declared],
+                "pending": [], "declared": declared}
+
+    confirmed: list[dict] = []
+    pending: list[dict] = []
+    for d in declared:
+        item = dict(d, confirmed=False)
+        loc = f"{d.get('file', '?')}::{d.get('function', '?')}"
+        ev = d.get("evidence", "")
+        if interactive:
+            print(f"\n  ⚠️ [单测人工确认] gen 用单测覆盖了函数 {loc}")
+            if ev:
+                print(f"     证据：{ev}")
+            ans = input("     此函数仅被单测覆盖，确认接受该单测覆盖? [y/N] ").strip().lower()
+            item["confirmed"] = ans in ("y", "yes")
+        # non-interactive default: not confirmed -> pending
+        (confirmed if item["confirmed"] else pending).append(item)
+    return {"confirmed": confirmed, "pending": pending, "declared": declared}
+
+
 def _prompt_verify(cfg: ProjectConfig, run_id: str, iter_n: int, iter_dir: Path,
                    manifest: dict) -> str:
     files = manifest.get("test_files", [])
@@ -239,6 +299,7 @@ async def run_loop(
     target_functions: list[tuple[str, str]] | None = None,
     target_context: str = "",
     quiet: bool = False,
+    interactive: bool = False,
 ) -> dict:
     """覆盖率闭环主入口。
 
@@ -506,6 +567,31 @@ async def run_loop(
                  data={"success": gen_result.success})
         print(f"      生成 {len(manifest.get('test_files', []))} 个文件 / "
               f"{len(manifest.get('new_functions', []))} 个用例函数")
+
+        # [b1] E2E-first: human confirmation gate for unit-test coverage
+        # gen declares unit-test-covered functions in manifest.unit_confirm_required.
+        # Interactive loop prompts y/n per function; non-interactive keeps them pending
+        # unless unit_confirm_auto_yes. Confirmed functions count as accepted coverage;
+        # pending ones are flagged in state/report for later human review.
+        confirm = _confirm_unit_coverage(cfg, manifest, interactive=interactive)
+        if confirm["declared"]:
+            print(f"      🚦 单测覆盖需人工确认：声明 {len(confirm['declared'])} 个，"
+                  f"已确认 {len(confirm['confirmed'])} 个，待确认 {len(confirm['pending'])} 个")
+            if confirm["pending"]:
+                obs.emit_diagnostic(
+                    "UNIT_CONFIRM_PENDING", run_id,
+                    message=f"iter {iter_n} 有 {len(confirm['pending'])} 个单测覆盖待人工确认",
+                    iter_n=iter_n, stage="gen", runs_dir=runs_dir)
+            # persist per-iteration gate result for the final report
+            (iter_dir / "unit_confirm.json").write_text(
+                json.dumps(confirm, ensure_ascii=False, indent=1), encoding="utf-8")
+            st.update_iteration(runs_dir, run_id, iter_n, {
+                "unit_confirm": {
+                    "declared": len(confirm["declared"]),
+                    "confirmed": [f"{d['file']}::{d['function']}" for d in confirm["confirmed"]],
+                    "pending": [f"{d['file']}::{d['function']}" for d in confirm["pending"]],
+                },
+            })
 
         # [c] static review (fail -> gen fix loop)
         # c0: deterministic doc-header gate (zero LLM cost) -- every test_* function's docstring

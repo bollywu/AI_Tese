@@ -340,6 +340,7 @@ async def _cmd_loop(cfg: ProjectConfig, args) -> int:
         max_iter=args.max_iter,
         skip_analyze=args.skip_analyze,
         skip_gap_agent=args.skip_gap_agent,
+        interactive=not args.yes,
     )
     return 0 if final.get("status") == "done" else 2
 

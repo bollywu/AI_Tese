@@ -57,13 +57,16 @@ def test_xxx(target):
 - 理想用例长度 = docstring + 3~8 行原子函数调用；超过就反思是不是漏了原子函数。
 - 测试点打印只用 `print_test_point_box()`，步骤记录只用 `manual_step()`（harness 已提供）。
 
-## 单测通道（e2e 不可达函数专用）
+## 单测通道（仅 e2e 不可达函数；必须人工确认）
 
-默认用 `run_binary()` 跑被测二进制（黑盒 E2E）。但某些函数的 gap 根因是
+**E2E 优先铁律**：默认用 `run_binary()` 跑被测二进制（黑盒 E2E）。**只有**某函数的 gap 根因是
 **N1（特定运行环境/多进程/信号）、N3（错误路径）、N5（死代码/平台相关/无调用点）**，
-它们很难/无法通过被测二进制的正常流程触达。此时走**单测通道**：写一个
-`test_driver_*.c` 直接调用目标函数，用 harness 的 `compile_unit_driver()` 以
-`--coverage` 插桩编译出单测二进制，再用 `run_driver()` 运行，让 gcov 采集到该函数。
+且你读过源码后确认无法通过任何 E2E 输入构造触达时，才允许走**单测通道**。能 E2E 触达的
+（N4/N6）一律 `run_binary`，不许用单测。
+
+单测通道写法（N1/N3/N5 专用）：写一个 `test_driver_*.c` 直接调用目标函数，用 harness 的
+`compile_unit_driver()` 以 `--coverage` 插桩编译出单测二进制，再用 `run_driver()` 运行，
+让 gcov 采集到该函数。**该函数必须列入 manifest 的 `unit_confirm_required` 并写明证据**。
 
 ```python
 def test_ut_parse_url_invalid():
@@ -85,7 +88,8 @@ def test_ut_parse_url_invalid():
   `#include` 或 extern 声明目标函数并直接调用，可接收 argv 让同一个 driver 走不同分支。
 - `compile_unit_driver` 的 `sources` 填目标函数所在源文件；`include_dirs` 填头文件目录。
 - 单测二进制自动落 `$AICOV_UT_OBJ_DIR`（--coverage 插桩，gcov 采集天然兼容）。
-- 单测只用于补 e2e 不可达的函数；能 E2E 触达的（N4/N6）仍优先 `run_binary`。
+- **每个单测覆盖函数必须进 manifest.unit_confirm_required（含 file/function/evidence），
+  否则该单测视为无效；闭环会经人工确认门禁逐个审核。**
 
 ## 执行可审计三要素（缺一不可）
 
@@ -124,9 +128,18 @@ def test_ut_parse_url_invalid():
   "new_functions": ["test_stats_latency_summary", "test_stats_latency_timeout"],
   "modified_files": [],
   "targets": [{"file": "src/stats.c", "functions": ["stats_summary"]}],
+  "e2e_functions": [{"file": "src/stats.c", "function": "stats_summary"}],
+  "unit_confirm_required": [
+    {"file": "src/url.c", "function": "parse_url_invalid", "evidence": "错误路径 N3，二进制无入口可触达"}
+  ],
   "summary": "本轮生成 N 个用例，覆盖 stats_summary 的正常/超时分支"
 }
 ```
+
+- `e2e_functions`：本轮通过黑盒 E2E（run_binary）覆盖的目标函数（非空时可缺省，但建议声明）。
+- `unit_confirm_required`：**通过单测通道（compile_unit_driver）覆盖、需要人工确认的函数**，
+  每项含 `file`/`function`/`evidence`（为什么 e2e 不可达）。**e2e-first 纪律下，所有单测覆盖
+  必须在此声明，否则该单测视为无效；声明后由闭环人工确认门禁逐个审核。**
 
 manifest 路径由 prompt 给出（iter 目录下 manifest.json）。字段名固定，不可改变。
 

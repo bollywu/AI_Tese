@@ -378,6 +378,40 @@ def write_final_report(
             L.append("✅ 无未覆盖函数（全部函数均已被执行）。")
             L.append("")
 
+    # ── 5.5 Single-test coverage pending human confirmation (E2E-first gate) ──
+    pending_unit: list[dict] = []
+    confirmed_unit: list[dict] = []
+    for d in _iter_dirs(run_dir):
+        uc = _load_json(d / "unit_confirm.json") or {}
+        for it in uc.get("pending") or []:
+            pending_unit.append({**it, "iter": int(d.name.split("_")[1])})
+        for it in uc.get("confirmed") or []:
+            confirmed_unit.append({**it, "iter": int(d.name.split("_")[1])})
+    if pending_unit:
+        sec("单测覆盖待人工确认（E2E-first 门禁）")
+        L.append("")
+        L.append("以下函数**仅被单测覆盖、尚未通过人工确认**（E2E-first 纪律：默认必须 e2e 覆盖；")
+        L.append("单测仅限 e2e 不可达且需人工确认）。在人工确认前，这些函数的单测覆盖不计入可靠覆盖。")
+        L.append("")
+        L.append("| 文件:行 | 函数 | 证据（为何 e2e 不可达） | 轮次 |")
+        L.append("|---------|------|--------------------------|------|")
+        for it in pending_unit:
+            ev = _cell(it.get("evidence") or "—")
+            L.append(f"| `{it.get('file', '?')}` | `{it.get('function', '?')}` | {ev} | iter {it['iter']} |")
+        L.append("")
+        L.append(f"> 人工确认方法：审阅上表证据后，对确认可接受的单测覆盖逐项 y 确认；"
+                 f"未确认的一律视为待确认，不计入可靠覆盖。共 {len(pending_unit)} 项待确认，"
+                 f"本轮已确认 {len(confirmed_unit)} 项。")
+        L.append("")
+    elif confirmed_unit:
+        sec("单测覆盖（已人工确认）")
+        L.append("")
+        L.append("以下函数经单测覆盖且**已通过人工确认**：")
+        L.append("")
+        for it in confirmed_unit:
+            L.append(f"- `{it.get('file', '?')}::{it.get('function', '?')}`（iter {it['iter']}）")
+        L.append("")
+
     # ── 6. Suspected product defects ───────────────────────────
     bugs: list[dict] = []
     for d in _iter_dirs(run_dir):

@@ -169,7 +169,7 @@ aicov html --from-json path/to/coverage.json --out ./report
 | `[build]` | clean_cmd / build_cmd / binary | 构建命令（**必须含 `--coverage` 插桩**，构建后会校验 `.gcno` 生成）；产物路径 — **Go 项目不需要** |
 | `[go]` | go_bin / packages / build_tags / coverprofile | Go 后端：`go` 可执行文件；测试包（默认 `./...`）；额外 `-tags`；coverprofile 输出路径 |
 | `[test]` | dir / python / timeout | pytest 目录（C/C++）；解释器（auto=探测）；整体超时（>0） |
-| `[coverage]` | gcov_bin / func_target / cond_target | gcov 可执行文件（仅 C/C++）；达标线 |
+| `[coverage]` | gcov_bin / func_target / cond_target / e2e_first / require_unit_confirm / unit_confirm_auto_yes | gcov 可执行文件（仅 C/C++）；达标线；E2E 优先治理与单测人工确认 |
 | `[loop]` | max_iter / no_progress_stop | 最大迭代；连续无增长轮数（早停） |
 | `[llm]` | model / gen_model / max_turns / max_verify_retry | 模型配置；max_turns=单次 agent 最大工具轮次（复杂项目建议 ≥120）；max_verify_retry=verify 失败修复回环次数（复杂项目建议 3） |
 | `[knowledge]` | kb_dir / badcase_dir / few_shots_dir / prompts_dir | 按项目自备的知识资源；prompts_dir 可整份覆盖内置 prompt |
@@ -191,6 +191,8 @@ your-project/
 **原子函数 → 用例搭积木**：用例体只做"构造数据 → 调 harness 原子函数 → 传给断言原子函数"；需要新验证维度时先扩展 `harness.py` 再让用例调用。
 
 **单测通道（e2e 不可达函数转单测）**：某些函数无法通过被测二进制的正常 E2E 流程触达（gap 根因 N1 特定运行环境/多进程/信号、N3 错误路径、N5 死代码/平台相关/无调用点）。此时 gen-agent 会生成 `test_driver_*.c` 直接调用目标函数，用 harness 的 `compile_unit_driver()`（`--coverage` 插桩）+ `run_driver()` 编译运行单测二进制，让 gcov 采集到该函数。因为 gcov 按源码树扫 `.gcno/.gcda`，单测通道与现有采集完全兼容，无需改采集逻辑。单测编译配置见 `aicoverage.toml` 的 `[unittest]` 段（compiler / flags / link_libs / obj_dir）。
+
+**E2E 优先覆盖治理 + 单测人工确认（2026-08-27）**：所有覆盖必须先通过 E2E 实现；确实无法 E2E 触达、必须用单测覆盖的函数，需**显式人工确认**后才算数。gen-agent 把每个单测覆盖函数声明进 `manifest.unit_confirm_required`（含"为何 e2e 不可达"的证据）；闭环运行人工确认门禁（交互模式逐函数 y/n；CI 可用 `unit_confirm_auto_yes` 自动放行）；最终报告列出所有**待人工确认**的单测覆盖。可在 `[coverage]` 配置：`e2e_first`、`require_unit_confirm`、`unit_confirm_auto_yes`。
 
 **稳定性优化（工程化加固）**：
 - **链接失败自愈**：`compile_unit_driver` 遇到 `undefined reference`（缺库）时自动逐个尝试常见库（`-lm`/`-lpthread`/`-lrt`/`-ldl`/`-lz`），成功即用；全部失败则提示在 `[unittest] link_libs` 补全

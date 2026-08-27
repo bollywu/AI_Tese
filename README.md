@@ -173,7 +173,7 @@ The report follows the classic drill-down form of mainstream coverage tools (ifr
 | `[build]` | clean_cmd / build_cmd / binary | build command (**must contain `--coverage` instrumentation**; `.gcno` generation is verified after build); artifact path — **not required for Go** |
 | `[go]` | go_bin / packages / build_tags / coverprofile | Go backend: `go` executable; test packages (default `./...`); extra `-tags`; coverprofile output path |
 | `[test]` | dir / python / timeout | pytest dir (C/C++); interpreter (auto=probe); overall timeout (>0) |
-| `[coverage]` | gcov_bin / func_target / cond_target | gcov executable (C/C++ only); threshold lines |
+| `[coverage]` | gcov_bin / func_target / cond_target / e2e_first / require_unit_confirm / unit_confirm_auto_yes | gcov executable (C/C++ only); threshold lines; E2E-first governance & unit-test confirmation |
 | `[loop]` | max_iter / no_progress_stop | max iterations; consecutive no-growth rounds (early stop) |
 | `[llm]` | model / gen_model / max_turns / max_verify_retry | model configuration; max_turns=per-agent max tool turns (≥120 for complex projects); max_verify_retry=verify fix-loop rounds (3 recommended for complex projects) |
 | `[knowledge]` | kb_dir / badcase_dir / few_shots_dir / prompts_dir | project-specific knowledge resources; prompts_dir can fully override built-in prompts |
@@ -195,6 +195,8 @@ your-project/
 **Atomic functions → test-case building blocks**: a test body only does "construct data → call a harness atomic function → feed the result to an assertion atomic function"; when a new verification dimension is needed, extend `harness.py` first, then let the test call it.
 
 **Unit-test channel (E2E-unreachable → unit test)**: some functions cannot be reached through the normal E2E flow of the binary under test (gap root causes N1 specific runtime env/multi-process/signal, N3 error path, N5 dead code/platform-specific/no call site). In such cases gen-agent generates a `test_driver_*.c` that calls the target function directly, using the harness's `compile_unit_driver()` (`--coverage` instrumentation) + `run_driver()` to build and run a unit-test binary, so gcov picks up that function. Since gcov scans the source tree for `.gcno/.gcda`, the unit-test channel is fully compatible with the existing collection logic — no changes needed there. Unit-test build settings live in the `[unittest]` section of `aicoverage.toml` (compiler / flags / link_libs / obj_dir).
+
+**E2E-first coverage governance + unit-test human confirmation (2026-08-27)**: all coverage must be reached through E2E first; a function that genuinely cannot be E2E-reached may only be covered by a unit test after **explicit human confirmation**. gen-agent declares every unit-test-covered function in `manifest.unit_confirm_required` (with evidence of why E2E is impossible); the loop runs a confirmation gate (interactive y/n per function, or auto-approve via `unit_confirm_auto_yes` for CI); the final report lists every single-test coverage still **pending human confirmation**. Configurable in `[coverage]`: `e2e_first`, `require_unit_confirm`, `unit_confirm_auto_yes`.
 
 **Stability hardening**:
 - **Link-failure self-healing**: on `undefined reference` (missing library), `compile_unit_driver` automatically tries common libraries (`-lm`/`-lpthread`/`-lrt`/`-ldl`/`-lz`) one by one; if all fail it hints to fill `[unittest] link_libs`

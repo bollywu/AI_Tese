@@ -55,6 +55,7 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
     "EXECUTE_FAIL_LOOP":    {"severity": "high",   "title": "连续多轮执行失败"},
     "COVERAGE_CEILING":     {"severity": "medium", "title": "覆盖率连续无增长（天花板）"},
     "MISSING_ARTIFACT":     {"severity": "medium", "title": "预期产物缺失"},
+    "UNIT_CONFIRM_PENDING": {"severity": "medium", "title": "存在待人工确认的单测覆盖（E2E-first 门禁）"},
     "EARLY_STOP":           {"severity": "low",    "title": "闭环早停"},
 }
 

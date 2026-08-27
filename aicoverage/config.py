@@ -134,6 +134,17 @@ class ProjectConfig:
     ut_link_libs: list[str] = field(default_factory=list)   # extra link libs, e.g. ["-lm", "-lpthread"]
     ut_obj_dir: str = ".aicoverage/ut"        # unit-test intermediate dir (relative to source_path; .gcno/.gcda here)
 
+    # ── Coverage-source governance (E2E-first + unit-test human confirmation) ──
+    # Requirement (2026-08-27): all coverage must be reached through E2E first; a
+    # function that genuinely cannot be E2E-reached may only be covered by a unit
+    # test after explicit human confirmation. gen-agent declares every unit-test-
+    # covered function in manifest.unit_confirm_required; the loop runs a
+    # confirmation gate; the final report lists everything still pending.
+    e2e_first: bool = True              # force E2E-first discipline in gen prompt
+    require_unit_confirm: bool = True   # require human confirmation for unit-test coverage
+    unit_confirm_auto_yes: bool = False # --yes mode: auto-approve declared unit tests
+                                        # (CI convenience; confirmed=false when off)
+
     # ── CodeGraph (for MR incremental loop: call-graph/diff attribution, all optional) ──
     codegraph_enabled: bool = False
     codegraph_index_dir: str = ".codegraph"          # relative to source_path
@@ -287,6 +298,10 @@ class ProjectConfig:
         env["AICOV_UT_COMPILER"] = getattr(self, "ut_compiler", "") or "gcc"
         env["AICOV_UT_FLAGS"] = " ".join(getattr(self, "ut_flags", ["-O0", "-g", "-Wall"]))
         env["AICOV_UT_LINK_LIBS"] = " ".join(getattr(self, "ut_link_libs", []))
+        # Coverage-source governance env (E2E-first + unit confirmation)
+        env["AICOV_E2E_FIRST"] = "1" if getattr(self, "e2e_first", True) else "0"
+        env["AICOV_REQUIRE_UNIT_CONFIRM"] = "1" if getattr(self, "require_unit_confirm", True) else "0"
+        env["AICOV_UNIT_CONFIRM_AUTO_YES"] = "1" if getattr(self, "unit_confirm_auto_yes", False) else "0"
         # Go backend env (getattr fallback for old instances lacking these fields)
         env["AICOV_GO_BIN"] = getattr(self, "go_bin", "go")
         env["AICOV_GO_PACKAGES"] = " ".join(getattr(self, "go_packages", ["./..."]))
@@ -361,6 +376,9 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
         gcov_bin=str(cov.get("gcov_bin", "gcov")).strip(),
         func_target=float(cov.get("func_target", 100.0)),
         cond_target=float(cov.get("cond_target", 85.0)),
+        e2e_first=bool(cov.get("e2e_first", True)),
+        require_unit_confirm=bool(cov.get("require_unit_confirm", True)),
+        unit_confirm_auto_yes=bool(cov.get("unit_confirm_auto_yes", False)),
         max_iter=int(loop.get("max_iter", 6)),
         no_progress_stop=int(loop.get("no_progress_stop", 2)),
         model=str(llm.get("model", "")).strip(),
