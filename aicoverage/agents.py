@@ -34,7 +34,10 @@ AGENT_TOOLS: dict[str, list[str]] = {
         "Bash", "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "LS",
         "TodoWrite", "delete_file",
     ],
-    "verify-agent": ["Bash", "Read", "Write"],
+    # verify-agent is static review: no execution of anything -- no Bash at all
+    # (a Bash whitelist entry is an arbitrary-execution hole; Grep/Glob added so it
+    # can cross-check harness signatures without reading whole files).
+    "verify-agent": ["Read", "Grep", "Glob", "Write"],
     "quality-agent": ["Bash", "Read", "Write", "Glob", "Grep", "LS", "TodoWrite"],
     "scan-agent": ["Bash", "Read", "Glob", "Grep", "LS", "Write"],
     "kb-agent": ["Bash", "Read", "Glob", "Grep", "LS", "Write", "TodoWrite"],

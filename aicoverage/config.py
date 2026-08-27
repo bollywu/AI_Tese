@@ -76,6 +76,7 @@ class ProjectConfig:
     clean_cmd: str = ""                      # optional, run before build
     build_cmd: str = ""                      # required, must include --coverage instrumentation
     binary: Path | None = None               # build artifact (absolute or relative to source_path)
+    build_timeout: int = 3600                # per-clean/build command timeout (sec)
 
     # ── Tests ─────────────────────────────────────────────────
     test_dirname: str = "tests"              # test dir name (relative to source_path)
@@ -380,6 +381,7 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
         clean_cmd=str(build.get("clean_cmd", "")).strip(),
         build_cmd=str(build.get("build_cmd", "")).strip(),
         binary=binary,
+        build_timeout=int(build.get("timeout", 3600)),
         test_dirname=str(test.get("dir", "tests")).strip() or "tests",
         test_python=str(test.get("python", "auto")).strip(),
         test_timeout=int(test.get("timeout", 600)),

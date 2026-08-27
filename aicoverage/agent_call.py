@@ -99,6 +99,18 @@ _backoff_elapsed: dict[str, float] = {}
 _COMPACT_MAX_PER_CALL = 2
 
 
+def reset_backoff() -> None:
+    """Reset the per-agent cumulative-backoff ledger (module-level state).
+
+    The ledger gates total retry time across attempts ("退避累计时长超限就放弃").
+    Without a reset it accumulates across runs in long-lived processes -- MR loops
+    run run_loop once per batch, and a CLI process may serve many runs -- so a
+    later run's agents would give up retrying on their FIRST 429, having inherited
+    the earlier runs' elapsed budget. run_loop calls this at entry.
+    """
+    _backoff_elapsed.clear()
+
+
 def _ctx_pressure_threshold() -> float:
     raw = os.environ.get("AICOV_CTX_PRESSURE_TOKENS", "").strip()
     if not raw:

@@ -107,6 +107,19 @@ def _collect_test_functions(test_dir: Path) -> dict[str, list[str]]:
     return result
 
 
+def _collect_go_test_functions(source_root: Path) -> dict[str, list[str]]:
+    """Go variant of the case inventory: *_test.go colocated with the packages
+    (2026-08-27 fix -- the inventory previously globbed only tests/test_*.py, so
+    Go loops always showed "未发现 test_*.py" despite working cases).
+    Each test function is annotated with its static source class (e2e/unit),
+    consistent with the coverage-source composition section."""
+    from .go_test_scope import scan_go_test_sources
+    by_file: dict[str, list[str]] = {}
+    for name, tf in scan_go_test_sources(source_root).items():
+        by_file.setdefault(Path(tf.file).name, []).append(f"{name}({tf.source})")
+    return by_file
+
+
 def _gen_origin(run_dir: Path) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
     """从各轮 manifest 得到 {文件: [新建轮次]} 与 {文件: [修改轮次]}。"""
     created: dict[str, list[int]] = {}
@@ -330,15 +343,27 @@ def write_final_report(
         L.append("")
 
     # ── 4. Case inventory ──────────────────────────────────────
-    disk_cases = _collect_test_functions(cfg.test_dir)
+    is_go = getattr(cfg, "language", "c") == "go"
+    if is_go:
+        # Go tests are *_test.go colocated with the packages, not tests/test_*.py
+        disk_cases = _collect_go_test_functions(cfg.source_path)
+    else:
+        disk_cases = _collect_test_functions(cfg.test_dir)
     created, modified = _gen_origin(run_dir)
     total_funcs = sum(len(v) for v in disk_cases.values())
     sec(f"用例清单（{len(disk_cases)} 个文件 / {total_funcs} 个用例函数）")
     L.append("")
-    L.append(f"用例目录：`{cfg.test_dir}`　原子函数库：`{cfg.tests_lib_dir / 'harness.py'}`")
+    if is_go:
+        L.append(f"用例位置：`*_test.go` 与源码包同目录（`{cfg.source_path}`）；"
+                 f"函数名后标注静态来源分类（e2e=走真实 HTTP/网络链路，unit=纯单测）")
+    else:
+        L.append(f"用例目录：`{cfg.test_dir}`　原子函数库：`{cfg.tests_lib_dir / 'harness.py'}`")
     L.append("")
     if not disk_cases:
-        L.append(f"⚠️ 用例目录下未发现任何 `test_*.py`（检查路径：`{cfg.test_dir}`）。")
+        if is_go:
+            L.append(f"⚠️ 源码树下未发现任何 `*_test.go`（检查路径：`{cfg.source_path}`）。")
+        else:
+            L.append(f"⚠️ 用例目录下未发现任何 `test_*.py`（检查路径：`{cfg.test_dir}`）。")
         L.append("")
     for fname, funcs in sorted(disk_cases.items()):
         tags = []

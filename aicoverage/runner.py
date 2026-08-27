@@ -222,8 +222,13 @@ class AgentRunner:
                         result.thinking_summaries.append(thinking.strip()[:200])
                 elif isinstance(block, ToolResultBlock):
                     self._backfill_tool_result(result, block)
-                elif isinstance(block, TextBlock) and not result.summary:
-                    result.summary = getattr(block, "text", "")[:500]
+                elif isinstance(block, TextBlock):
+                    # last non-empty text block wins: the agent's one-line conclusion
+                    # (and error keywords for failure classification) comes at the end,
+                    # not in the opening remark
+                    text = getattr(block, "text", "")
+                    if text.strip():
+                        result.summary = text[:500]
         elif isinstance(msg, ResultMessage):
             result.duration_ms = getattr(msg, "duration_ms", result.duration_ms)
             result.cost_usd = getattr(msg, "total_cost_usd", 0.0) or 0.0

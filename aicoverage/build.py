@@ -58,16 +58,17 @@ def run_shell(cmd: str, cwd: Path, timeout: int = 3600) -> tuple[int, str, float
 def build(cfg: ProjectConfig, *, skip_clean: bool = False, log_dir: Path | None = None) -> BuildResult:
     """Run the instrumented build and verify it."""
     result = BuildResult(ok=False, binary=cfg.binary_path)
+    build_timeout = getattr(cfg, "build_timeout", 3600)
 
     logs: list[str] = []
     if cfg.clean_cmd and not skip_clean:
-        rc, log, dur = run_shell(cfg.clean_cmd, cfg.source_path)
+        rc, log, dur = run_shell(cfg.clean_cmd, cfg.source_path, timeout=build_timeout)
         logs.append(f"$ {cfg.clean_cmd}\n(rc={rc}, {dur:.1f}s)\n{log[-4000:]}")
         if rc != 0:
             # clean failure is not fatal (first build may have nothing to clean)
             logs.append("⚠ clean 命令非零退出（忽略，继续构建）")
 
-    rc, log, dur = run_shell(cfg.build_cmd, cfg.source_path)
+    rc, log, dur = run_shell(cfg.build_cmd, cfg.source_path, timeout=build_timeout)
     result.duration_s = dur
     logs.append(f"$ {cfg.build_cmd}\n(rc={rc}, {dur:.1f}s)\n{log[-8000:]}")
     result.log = "\n\n".join(logs)
@@ -82,7 +83,8 @@ def build(cfg: ProjectConfig, *, skip_clean: bool = False, log_dir: Path | None 
         _dump_log(log_dir, logs)
         return result
 
-    result.gcno_count = len(find_gcno_files(cfg.source_path))
+    gcno_files = find_gcno_files(cfg.source_path)
+    result.gcno_count = len(gcno_files)
     if result.gcno_count == 0:
         result.failure_reason = (
             "构建成功但未发现 .gcno 文件——build_cmd 大概率没有带 --coverage 插桩，"
@@ -91,6 +93,23 @@ def build(cfg: ProjectConfig, *, skip_clean: bool = False, log_dir: Path | None 
         )
         _dump_log(log_dir, logs)
         return result
+
+    # gcno freshness/completeness warning (2026-08-27 hardening): a source file
+    # without a matching .gcno silently reports 0% forever. Incremental builds
+    # commonly miss newly-added files. Warn (not fail -- some files may be
+    # intentionally excluded from the build).
+    gcno_stems = {p.stem for p in gcno_files}
+    try:
+        src_files = [p for p in cfg.source_files()
+                     if p.suffix not in (".h", ".hpp", ".hxx")]
+        missing = [p for p in src_files if p.stem not in gcno_stems]
+    except Exception:  # noqa: BLE001 — 清单失败不影响构建判定
+        missing = []
+    if missing:
+        names = ", ".join(p.name for p in missing[:10])
+        logs.append(f"⚠ {len(missing)} 个源文件没有对应 .gcno（这些文件覆盖率将恒为 0%）: "
+                    f"{names}{'...' if len(missing) > 10 else ''}——"
+                    f"若为增量构建请全量重建（clean 后 build）")
 
     result.ok = True
     _dump_log(log_dir, logs)

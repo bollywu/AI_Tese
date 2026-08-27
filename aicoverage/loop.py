@@ -26,7 +26,7 @@ from pathlib import Path
 
 from . import observability as obs
 from . import state as st
-from .agent_call import call_agent
+from .agent_call import call_agent, reset_backoff
 from .assertquality import check_assert_quality
 from .build import build as do_build
 from .config import ProjectConfig
@@ -578,6 +578,10 @@ async def run_loop(
     func_target = func_target if func_target is not None else cfg.func_target
     cond_target = cond_target if cond_target is not None else cfg.cond_target
     max_iter = max_iter or cfg.max_iter
+
+    # Per-run retry budget: the cumulative-backoff ledger is module-level state and
+    # must not leak across runs (MR loops invoke run_loop once per batch).
+    reset_backoff()
 
     from .incremental import missing_targets, scope_report
 

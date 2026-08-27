@@ -336,23 +336,69 @@ def collect(
     ut_root = Path(ut_dir).resolve() if ut_dir else None
 
     work_dir = out_dir or (source_root / ".aicoverage" / "coverage_raw")
-    # Always start fresh (the old partial-glob cleanup can't handle the new subdir structure)
-    if work_dir.exists():
-        import shutil as _shutil
+    # Incremental gcov cache (2026-08-27 perf hardening): previously every round
+    # rmtree'd the whole work_dir and re-ran gcov for EVERY .gcno (ModSecurity's
+    # 122 units re-processed on each of 8+ loop iterations). gcno order is stable
+    # (find_gcno_files sorts), so subdir <i> maps deterministically to a gcno path;
+    # a subdir is reused when its outputs are newer than the matching .gcda, and
+    # only changed/removed units are re-run. The map file keeps index->gcno stable
+    # across rounds; a stale subdir (gcno gone or reassigned) is removed so its old
+    # output never leaks into aggregation.
+    import shutil as _shutil
+    index_map_path = work_dir / "_index_map.json"
+    prev_map: dict[str, str] = {}
+    if index_map_path.exists():
+        try:
+            prev_map = json.loads(index_map_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            prev_map = {}
+    else:
+        # unknown layout (first run / legacy dir): start clean once
         _shutil.rmtree(work_dir, ignore_errors=True)
     work_dir.mkdir(parents=True, exist_ok=True)
+    cur_map = {str(i): str(gcno) for i, gcno in enumerate(gcno_files)}
+    # stale cleanup: (a) numeric subdirs absent from the current gcno set -- their
+    # gcno was deleted; (b) subdirs whose gcno was reassigned to a different path.
+    # Any survivor's old output would otherwise leak into aggregation.
+    for sub in work_dir.iterdir():
+        if sub.is_dir() and sub.name.isdigit() and sub.name not in cur_map:
+            _shutil.rmtree(sub, ignore_errors=True)
+    for idx_str, old_gcno in prev_map.items():
+        if cur_map.get(idx_str) != old_gcno:
+            _shutil.rmtree(work_dir / idx_str, ignore_errors=True)
 
     from .globutil import glob_matches
 
-    # ut flag per subdir gcno: subdir index -> is unit-test source.
-    # gcov runs in parallel via a thread pool (each .gcno is an independent subprocess
-    # writing to its own subdir, no interference), significantly speeding up projects
-    # with many .gcno files (P3 perf optimization).
     gcno_is_ut: dict[int, bool] = {}
+
+    def _ut_flag(gcno: Path) -> bool:
+        try:
+            return ut_root is not None and gcno.resolve().is_relative_to(ut_root)
+        except ValueError:
+            return False
+
+    def _subdir_fresh(sub: Path, gcno: Path) -> bool:
+        """Whether sub's existing gcov outputs are newer than gcno's .gcda."""
+        if prev_map.get(sub.name) != str(gcno):
+            return False
+        outs = [p for p in sub.rglob("*.gcov.json*") if p.is_file()]
+        if not outs:
+            return False
+        gcda = gcno.with_suffix(".gcda")
+        try:
+            newest_out = max(p.stat().st_mtime for p in outs)
+            gcda_mtime = gcda.stat().st_mtime if gcda.exists() else 0.0
+        except OSError:
+            return False
+        return newest_out >= gcda_mtime
 
     def _run_gcov(i_gcno: tuple[int, Path]) -> bool:
         i, gcno = i_gcno
         sub = work_dir / str(i)
+        if _subdir_fresh(sub, gcno):
+            return _ut_flag(gcno)  # cached: outputs newer than .gcda, skip re-run
+        if sub.exists():
+            _shutil.rmtree(sub, ignore_errors=True)
         sub.mkdir(parents=True, exist_ok=True)
         try:
             subprocess.run(
@@ -361,10 +407,7 @@ def collect(
             )
         except (subprocess.TimeoutExpired, OSError):
             return False
-        try:
-            return ut_root is not None and gcno.resolve().is_relative_to(ut_root)
-        except ValueError:
-            return False
+        return _ut_flag(gcno)
 
     import concurrent.futures as _cf
     workers = min(8, max(1, (os.cpu_count() or 4)))
@@ -372,6 +415,10 @@ def collect(
         results = list(pool.map(_run_gcov, list(enumerate(gcno_files))))
     for i, is_ut in enumerate(results):
         gcno_is_ut[i] = is_ut
+    try:
+        index_map_path.write_text(json.dumps(cur_map), encoding="utf-8")
+    except OSError:
+        pass
 
     # Order-independent: no sorted(); processing order doesn't affect the merge
     json_paths = list(work_dir.rglob("*.gcov.json")) + list(work_dir.rglob("*.gcov.json.gz"))

@@ -102,8 +102,31 @@ def load_all(cfg) -> list[BadcaseEntry]:
 
 # ── Read side: prompt-injection hint ────────────────────────────────
 
+# mtime-keyed single-slot cache: badcase_hint is called several times per round
+# (gen prompt, scan_gen prompt, quality prompt); re-reading + re-parsing the
+# library each call is wasteful once it grows.
+_HINT_CACHE: dict = {"key": None, "value": ""}
+
+
 def badcase_hint(cfg) -> str:
     """The badcase hint injected into the gen prompt (the read-side core). Returns "" when no library."""
+    proj = project_badcases_path(cfg.workspace)
+    try:
+        key = (str(cfg.workspace),
+               _BASE_PATH.stat().st_mtime if _BASE_PATH.exists() else 0.0,
+               proj.stat().st_mtime if proj.exists() else 0.0)
+    except OSError:
+        key = None
+    if key is not None and _HINT_CACHE["key"] == key:
+        return _HINT_CACHE["value"]
+    hint = _build_hint(cfg)
+    if key is not None:
+        _HINT_CACHE["key"] = key
+        _HINT_CACHE["value"] = hint
+    return hint
+
+
+def _build_hint(cfg) -> str:
     entries = load_all(cfg)
     if not entries:
         return ""

@@ -35,12 +35,22 @@ BLOCKED_PATTERNS = [
     r"\bdd\s+if=",
 ]
 
-# gen-agent forbidden from running test commands (iron rule: execution belongs only to the
-# deterministic executor)
-GEN_BLOCKED = [
+# Execution iron rule, enforced for EVERY LLM agent (2026-08-27 hardening round 2):
+# tests may only run via the deterministic executor (pytest for C/C++, go test for
+# Go). Previously this list only applied to gen-agent, while verify/quality/
+# analyzer/coverage/scan/kb agents all carried a Bash tool and could run pytest
+# freely -- a scan-track verify-agent sneaking a pytest run before S4 pollutes
+# .gcda (S4 executes with collect_coverage=False, no clean), corrupting coverage
+# attribution for later rounds. go test is blocked too (Go parity).
+TEST_BLOCKED = [
     r"\bpytest\b",
     r"\bpython\s+-m\s+pytest\b",
     r"\buv\s+run\s+pytest\b",
+    r"\bgo\s+test\b",
+]
+
+# gen-agent extra bans: no git state manipulation
+GEN_GIT_BLOCKED = [
     r"\bgit\s+(push|reset|checkout\s+--)\b",
 ]
 
@@ -123,14 +133,23 @@ def make_security_hooks(agent_name: str, cfg: ProjectConfig):
                 return {"decision": "block",
                         "reason": f"命令被项目 guard.blocked_commands 拦截（匹配 {pattern.pattern}）"}
 
-        # gen-agent extra bans: no test execution, no git ops
+        # Execution iron rule (ALL agents): no test execution -- the deterministic
+        # executor is the only place tests may run.
+        for pattern in TEST_BLOCKED:
+            if re.search(pattern, cmd):
+                return {
+                    "decision": "block",
+                    "reason": (f"执行铁律：测试执行唯一归属确定性 executor，"
+                               f"任何 agent 不得执行 pytest/go test（匹配 {pattern}）。"),
+                }
+        # gen-agent extra bans: no git state manipulation
         if agent_name == "gen-agent":
-            for pattern in GEN_BLOCKED:
+            for pattern in GEN_GIT_BLOCKED:
                 if re.search(pattern, cmd):
                     return {
                         "decision": "block",
-                        "reason": (f"gen-agent 铁律：禁止执行测试/git 命令（匹配 {pattern}）。"
-                                   "只生成/修改用例文件，执行由确定性 executor 负责。"),
+                        "reason": (f"gen-agent 铁律：禁止 git 状态操作（匹配 {pattern}）。"
+                                   "只生成/修改用例文件。"),
                     }
         # verify-agent ban: must not run the target binary (static review does not execute)
         if agent_name == "verify-agent" and binary_name and re.search(rf"\b{re.escape(binary_name)}\b", cmd):
@@ -189,12 +208,20 @@ def make_security_hooks(agent_name: str, cfg: ProjectConfig):
         if agent_name == "gen-agent":
             try:
                 p = Path(file_path).expanduser().resolve()
+                # Go tests live next to the source packages by convention
+                # (internal/router/router_test.go), NOT under a separate tests/ dir.
+                # Without this branch the rule below would block every Go case the
+                # moment the SDK starts delivering Write hooks (silent bomb).
+                if getattr(cfg, "language", "c") == "go" and p.name.endswith("_test.go"):
+                    return {}
                 if str(p).startswith(str(cfg.source_path)) and cfg.test_dir in p.parents:
                     return {}
                 if str(p).startswith(str(cfg.source_path)):
                     return {"decision": "block",
-                            "reason": (f"gen-agent 只能写测试目录 {cfg.test_dir}，"
-                                       "不得修改被测源码。")}
+                            "reason": (f"gen-agent 只能写测试目录 {cfg.test_dir}"
+                                       + ("（Go 项目为 *_test.go 与源码同目录）"
+                                          if getattr(cfg, "language", "c") == "go" else "") +
+                                       "，不得修改被测源码。")}
             except (OSError, RuntimeError):
                 pass
         return {}
