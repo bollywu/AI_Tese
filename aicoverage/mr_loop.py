@@ -41,6 +41,58 @@ def _write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def _base_compare_batch(cfg: ProjectConfig, state: dict, base_ref: str) -> dict | None:
+    """Re-run a batch's failing test files against base_ref (isolated worktree).
+
+    Locates the batch run's latest iteration with failed cases, maps the failed
+    test-function names to their files (deterministic scan of the test dir), and
+    delegates to bugcheck.compare_base_head. Returns
+    {"verdicts": {case: regression_confirmed|preexisting|unknown}, "base_ref": ...}
+    or None when there are no failing cases / the comparison is inconclusive.
+    """
+    run_id = state.get("run_id")
+    if not run_id:
+        return None
+    run_dir = cfg.runs_dir / run_id
+    import re as _re
+
+    def _iter_order(p: Path) -> int:
+        m = _re.fullmatch(r"iter_(\d+)", p.name)
+        return int(m.group(1)) if m else -1
+
+    head_cases: dict[str, str] = {}
+    for d in sorted(run_dir.glob("iter_*"), key=_iter_order, reverse=True):
+        e = json.loads((d / "execution.json").read_text(encoding="utf-8")) \
+            if (d / "execution.json").exists() else {}
+        head_cases = e.get("cases") or {}
+        if any(s in ("fail", "error") for s in head_cases.values()):
+            break
+    failed = {n for n, s in head_cases.items() if s in ("fail", "error")}
+    if not failed:
+        return None
+    # map failed function names -> test files (deterministic dir scan)
+    test_files: list[Path] = []
+    if cfg.test_dir.is_dir():
+        for p in sorted(cfg.test_dir.glob("test_*.py")):
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if any(f"def {n}(" in text for n in failed):
+                test_files.append(p)
+    if not test_files:
+        return None
+    from .bugcheck import compare_base_head, regression_verdicts
+    res = compare_base_head(cfg, test_files, base_ref=base_ref)
+    if not res:
+        return None
+    verdicts = regression_verdicts(head_cases, res["base_cases"])
+    if not verdicts:
+        return None
+    return {"verdicts": verdicts, "base_ref": base_ref,
+            "compared_cases": sorted(verdicts)}
+
+
 async def run_mr_loop(
     cfg: ProjectConfig,
     *,
@@ -174,13 +226,28 @@ async def run_mr_loop(
                 quiet=quiet,
             )
             fm = state.get("final_metrics", {}) or {}
-            summary["coverage_batches"].append({
+            batch_entry = {
                 "batch_index": i,
                 "functions": [list(t) for t in batch],
                 "run_id": state.get("run_id"),
                 "status": state.get("status"), "exit_reason": state.get("exit_reason"),
                 "func_pct": fm.get("func_pct"), "cond_pct": fm.get("cond_pct"),
-            })
+            }
+            # [M2.5] base-version comparison for failing cases (plan 3.2, opt-in via
+            # [coverage].bug_base_compare): re-run the failing test files against
+            # base_ref in an isolated git worktree; pass@base + fail@head is factual
+            # proof the change introduced the regression (regression_confirmed).
+            # Failure-tolerant: any error -> skipped, never blocks the MR loop.
+            if getattr(cfg, "bug_base_compare", False):
+                reg = _base_compare_batch(cfg, state, base_ref)
+                if reg:
+                    batch_entry["regression"] = reg
+                    n_conf = sum(1 for v in reg["verdicts"].values()
+                                 if v == "regression_confirmed")
+                    if n_conf:
+                        print(f"  🔴 base 对照：{n_conf} 个失败用例在 base 版本通过"
+                              f"——本次变更引入的回归（regression_confirmed）")
+            summary["coverage_batches"].append(batch_entry)
             first = False
         done = sum(1 for b in summary["coverage_batches"] if b["status"] == "done")
         print(f"\n[M2] 覆盖轨完成：{done}/{len(batches)} 批达标")
@@ -259,6 +326,21 @@ def _write_mr_report(cfg: ProjectConfig, summary: dict, ex: diffextract.DiffExtr
                 f"{b.get('status', '-')} | {b.get('exit_reason', '-')} | "
                 f"{b.get('func_pct', '-')} | {b.get('cond_pct', '-')} |")
         L.append("")
+        # base-version comparison disclosure (plan 3.2): failing cases re-run against
+        # base_ref in an isolated worktree; pass@base+fail@head = regression introduced
+        # by this change (factual, not LLM-inferred)
+        reg_batches = [b for b in batches if b.get("regression")]
+        if reg_batches:
+            L += ["### 失败用例 base 版本对照（回归归因）", "",
+                  "| 批次 | 用例 | 对照结论 |",
+                  "|------|------|---------|"]
+            for b in reg_batches:
+                for case, verdict in b["regression"]["verdicts"].items():
+                    icon = {"regression_confirmed": "🔴 本次变更引入",
+                            "preexisting": "🟡 base 已存在（存量问题）",
+                            "unknown": "⚪ base 未跑出结论"}.get(verdict, verdict)
+                    L.append(f"| {b['batch_index']} | `{case}` | {icon} |")
+            L.append("")
         unreachable = summary.get("unreachable") or []
         if unreachable:
             L += ["### 入口不可达（疑似死代码/未接线）", ""]

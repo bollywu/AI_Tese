@@ -15,10 +15,15 @@ from aicoverage.scanverify import (  # noqa: E402
 
 
 class _FakeExec:
-    def __init__(self, verdict: str, failures: int = 0, errors: int = 0):
+    def __init__(self, verdict: str, failures: int = 0, errors: int = 0,
+                 cases: dict[str, str] | None = None):
         self.verdict = verdict
         self.failures = failures
         self.errors = errors
+        # per-case results keyed by bare test-function name (new contract:
+        # adjudication looks up the issue's own test function, never the
+        # whole-run verdict)
+        self.cases = cases if cases is not None else {}
 
 
 _ISSUES = [
@@ -56,11 +61,12 @@ class TestVerdicts:
         assert v["ISSUE-01"]["verdict"] == VERDICT_INCONCLUSIVE
 
     def test_exec_fail_confirmed(self):
-        """正向断言语义：复现用例 FAIL = 程序异常 = 缺陷坐实。"""
+        """正向断言语义：该 issue 自己的复现用例 FAIL = 程序异常 = 缺陷坐实。"""
         dispositions = {"ISSUE-01": {"disposition": "e2e",
                                      "test_function": "t1"}}
         v = compute_verdicts(_ISSUES[:1], {}, dispositions,
-                             _FakeExec("FAIL", failures=1), {"verdict": "pass"})
+                             _FakeExec("FAIL", failures=1, cases={"t1": "fail"}),
+                             {"verdict": "pass"})
         assert v["ISSUE-01"]["verdict"] == VERDICT_CONFIRMED
 
     def test_exec_pass_false_positive(self):
@@ -68,8 +74,49 @@ class TestVerdicts:
         dispositions = {"ISSUE-01": {"disposition": "e2e",
                                      "test_function": "t1"}}
         v = compute_verdicts(_ISSUES[:1], {}, dispositions,
-                             _FakeExec("PASS"), {"verdict": "pass"})
+                             _FakeExec("PASS", cases={"t1": "pass"}),
+                             {"verdict": "pass"})
         assert v["ISSUE-01"]["verdict"] == VERDICT_FALSE_POSITIVE
+
+    def test_no_case_detail_never_borrows_global_verdict(self):
+        """防张冠李戴回归（2026-08-27 修复核心）：junit 无用例明细时，
+        即使整轮 FAIL 也不把全局结论借给任何 issue——一律 inconclusive，不猜。"""
+        dispositions = {"ISSUE-01": {"disposition": "e2e",
+                                     "test_function": "t1"}}
+        v = compute_verdicts(_ISSUES[:1], {}, dispositions,
+                             _FakeExec("FAIL", failures=1),  # cases 为空
+                             {"verdict": "pass"})
+        assert v["ISSUE-01"]["verdict"] == VERDICT_INCONCLUSIVE
+
+    def test_per_issue_attribution_no_cross_contamination(self):
+        """逐 issue 归因（修复前缺陷：3 个 issue 复用同一全局 verdict）：
+        同一轮执行中 t1 FAIL、t2 PASS → ISSUE-01 坐实、ISSUE-02 误报，
+        互不污染；test_function 与实际用例名不一致 → inconclusive。"""
+        dispositions = {
+            "ISSUE-01": {"disposition": "e2e", "test_function": "t1"},
+            "ISSUE-02": {"disposition": "e2e", "test_function": "t2"},
+            "ISSUE-03": {"disposition": "e2e", "test_function": "t_typo"},
+        }
+        v = compute_verdicts(
+            _ISSUES[:3], {}, dispositions,
+            _FakeExec("FAIL", failures=1, cases={"t1": "fail", "t2": "pass"}),
+            {"verdict": "pass"})
+        assert v["ISSUE-01"]["verdict"] == VERDICT_CONFIRMED
+        assert v["ISSUE-02"]["verdict"] == VERDICT_FALSE_POSITIVE
+        assert v["ISSUE-03"]["verdict"] == VERDICT_INCONCLUSIVE
+
+    def test_case_error_or_skipped_is_inconclusive(self):
+        """用例 error（setup/框架异常）或 skipped 都不构成断言结论 → inconclusive。"""
+        dispositions = {
+            "ISSUE-01": {"disposition": "e2e", "test_function": "t1"},
+            "ISSUE-02": {"disposition": "e2e", "test_function": "t2"},
+        }
+        v = compute_verdicts(
+            _ISSUES[:2], {}, dispositions,
+            _FakeExec("FAIL", failures=1, cases={"t1": "error", "t2": "skipped"}),
+            {"verdict": "pass"})
+        assert v["ISSUE-01"]["verdict"] == VERDICT_INCONCLUSIVE
+        assert v["ISSUE-02"]["verdict"] == VERDICT_INCONCLUSIVE
 
     def test_not_executed_inconclusive(self):
         dispositions = {"ISSUE-01": {"disposition": "e2e",
@@ -79,17 +126,19 @@ class TestVerdicts:
         assert v["ISSUE-01"]["verdict"] == VERDICT_INCONCLUSIVE
 
     def test_mixed_four_verdicts(self):
-        """四态混合：每条独立判定，互不影响。"""
+        """四态混合：每条独立判定，互不影响（按各自 test_function 的执行状态）。"""
         dispositions = {
-            "ISSUE-01": {"disposition": "e2e", "test_function": "t1"},   # FAIL→confirmed
-            "ISSUE-02": {"disposition": "e2e", "test_function": "t2"},   # PASS→fp
+            "ISSUE-01": {"disposition": "e2e", "test_function": "t1"},   # fail→confirmed
+            "ISSUE-02": {"disposition": "e2e", "test_function": "t2"},   # pass→fp
             "ISSUE-03": {"disposition": "unobservable", "reason": "x"},  # unobservable
             # ISSUE-04 无 disposition → inconclusive
         }
-        v = compute_verdicts(_ISSUES, {}, dispositions,
-                             _FakeExec("PASS"), {"verdict": "pass"})
-        # 执行是整体 PASS（junit 不按用例拆分时，全部 e2e 都判 fp——这里
-        # 用整体 PASS 验证：confirmed 需要 FAIL 执行）
+        v = compute_verdicts(
+            _ISSUES, {}, dispositions,
+            _FakeExec("FAIL", failures=1, cases={"t1": "fail", "t2": "pass"}),
+            {"verdict": "pass"})
+        # 同一轮执行：t1 FAIL、t2 PASS —— 按 issue 自己的用例分别裁决
+        assert v["ISSUE-01"]["verdict"] == VERDICT_CONFIRMED
         assert v["ISSUE-02"]["verdict"] == VERDICT_FALSE_POSITIVE
         assert v["ISSUE-03"]["verdict"] == VERDICT_UNOBSERVABLE
         assert v["ISSUE-04"]["verdict"] == VERDICT_INCONCLUSIVE

@@ -244,6 +244,17 @@ def write_final_report(
     L.append("> Δ 为相对上一轮的百分点变化；「本轮新命中函数」= 上一轮未覆盖、本轮被覆盖的函数个数。")
     L.append("")
 
+    # claim-vs-fact disclosure (2026-08-27 hardening): declared-covered functions
+    # that gcov never hit -- the declaration/fact divergence must be reviewer-visible
+    claim_notes = [(it.get("iter"), it.get("claim_mismatch"))
+                   for it in iters if it.get("claim_mismatch")]
+    if claim_notes:
+        L.append("**⚠️ 声明与事实不符（claim mismatch）**：以下函数被 manifest 声明为已覆盖，"
+                 "但确定性 gcov 校验显示未命中（零 LLM 校验，声明 ≠ 事实，需人工复核）：")
+        for n, miss in claim_notes:
+            L.append(f"- iter {n}：{', '.join(f'`{m}`' for m in miss)}")
+        L.append("")
+
     stage_rows = _stage_summaries(run_dir)
     if stage_rows:
         L.append("### 各轮阶段结论")
@@ -257,9 +268,10 @@ def write_final_report(
     # ── 3. Test execution results ──────────────────────────────
     sec("用例执行结果")
     L.append("")
-    L.append("| 轮次 | verdict | 用例数 | 通过 | 失败 | 错误 | 跳过 | 耗时(s) |")
-    L.append("|------|---------|-------|------|------|------|------|--------|")
+    L.append("| 轮次 | verdict | 用例数 | 通过 | 失败 | 错误 | 跳过 | flaky | 耗时(s) |")
+    L.append("|------|---------|-------|------|------|------|------|-------|--------|")
     exec_rows = []
+    flaky_all: dict[str, list[str]] = {}
     for d in _iter_dirs(run_dir):
         execution = _load_json(d / "execution.json")
         if not execution:
@@ -268,16 +280,31 @@ def write_final_report(
         n = int(d.name.split("_")[1])
         passed = max(stats["tests"] - stats["failures"] - stats["errors"] - stats["skipped"], 0)
         label = "基线" if n == 0 else str(n)
+        flaky_n = len(execution.get("flaky_cases") or [])
+        if execution.get("flaky_cases"):
+            flaky_all[label] = execution["flaky_cases"]
         L.append(f"| {label} | {execution.get('verdict', '—')} | {stats['tests']} | {passed} | "
                  f"{stats['failures']} | {stats['errors']} | {stats['skipped']} | "
+                 f"{flaky_n or '—'} | "
                  f"{execution.get('duration_s', stats['time']):.1f} |")
+        # all_skipped / high skip rate disclosure: a green-looking round that
+        # skipped most cases verified nothing -- surface it explicitly (2026-08-27)
+        if execution.get("failure_kind") == "all_skipped":
+            L.append(f"| ⚠️ | 全部用例被跳过（`{execution.get('detail', '')}`） | | | | | | | |")
+        elif stats["tests"] and stats["skipped"] / stats["tests"] > 0.30:
+            L.append(f"| ⚠️ | 跳过率 {stats['skipped'] / stats['tests']:.0%}（被跳过的用例未产生验证） | | | | | | | |")
         exec_rows.append((label, failed))
     if not exec_rows:
-        L.append("| — | 未执行 | 0 | 0 | 0 | 0 | 0 | 0.0 |")
+        L.append("| — | 未执行 | 0 | 0 | 0 | 0 | 0 | — | 0.0 |")
     L.append("")
     if not exec_rows:
         L.append("⚠️ 本次运行没有任何轮次产出执行结果（`execution.json` 缺失）——"
                  "可能是插桩构建失败、gen 阶段未产出用例，或闭环在执行前就早停。")
+        L.append("")
+    if flaky_all:
+        L.append("**flaky 用例**（确定性复检：两次运行结果不一致，事实性证据）：")
+        for label, names in flaky_all.items():
+            L.append(f"- 轮次 {label}：{', '.join(f'`{n}`' for n in names)}")
         L.append("")
 
     fail_blocks = [(label, failed) for label, failed in exec_rows if failed]
@@ -387,6 +414,34 @@ def write_final_report(
             pending_unit.append({**it, "iter": int(d.name.split("_")[1])})
         for it in uc.get("confirmed") or []:
             confirmed_unit.append({**it, "iter": int(d.name.split("_")[1])})
+
+    # Coverage-source composition (plan 6.4): e2e vs unit share, reviewable at a glance
+    e2e_claimed: set[str] = set()
+    unit_declared: set[str] = set()
+    for d in _iter_dirs(run_dir):
+        m = _load_json(d / "manifest.json") or {}
+        for it in m.get("e2e_functions") or []:
+            e2e_claimed.add(f"{it.get('file', '?')}::{it.get('function', '?')}")
+        for it in m.get("unit_confirm_required") or []:
+            unit_declared.add(f"{it.get('file', '?')}::{it.get('function', '?')}")
+    if e2e_claimed or unit_declared or pending_unit or confirmed_unit:
+        confirmed_locs = {f"{it.get('file', '?')}::{it.get('function', '?')}"
+                          for it in confirmed_unit}
+        sec("覆盖来源构成（E2E-first 审计）")
+        L.append("")
+        L.append(f"- E2E 声明覆盖：**{len(e2e_claimed)}** 个函数"
+                 f"（manifest.e2e_functions，经 claim 校验）")
+        L.append(f"- 单测声明覆盖：**{len(unit_declared)}** 个函数"
+                 f"（其中已人工确认 {len(unit_declared & confirmed_locs)} / 待确认 {len(pending_unit)}）")
+        total_src = len(e2e_claimed | unit_declared)
+        if total_src:
+            unit_ratio = len(unit_declared) / total_src
+            L.append(f"- **单测占比：{unit_ratio:.0%}**"
+                     + ("（⚠️ 超过 E2E-first 配额，应优先转 e2e）"
+                        if unit_ratio > getattr(cfg, "max_unit_ratio", 0.15)
+                        else "（符合 E2E-first 纪律）"))
+        L.append("")
+
     if pending_unit:
         sec("单测覆盖待人工确认（E2E-first 门禁）")
         L.append("")
@@ -412,18 +467,91 @@ def write_final_report(
             L.append(f"- `{it.get('file', '?')}::{it.get('function', '?')}`（iter {it['iter']}）")
         L.append("")
 
-    # ── 6. Suspected product defects ───────────────────────────
+    # ── 5.7 Requirement traceability matrix (plan 4.2) ────────
+    # requirement -> target functions -> covered? -> which cases reference them.
+    # Makes "whether the requirement has been tested" quantifiable instead of only
+    # a bare coverage number. All from on-disk artifacts (test_plan + coverage +
+    # test-source scan); no inference.
+    plan = _load_json(run_dir / "test_plan.json")
+    if plan and plan.get("targets"):
+        sec("需求覆盖追溯矩阵")
+        L.append("")
+        if plan.get("requirement"):
+            L.append(f"需求：{plan['requirement'][:300]}")
+            L.append("")
+        L.append("| 目标 | 优先级 | 函数 | 覆盖状态 | 引用用例 |")
+        L.append("|------|--------|------|---------|---------|")
+        for t in plan["targets"]:
+            tid = t.get("id", "?")
+            prio = t.get("priority", "—")
+            funcs = t.get("functions") or []
+            if not funcs:
+                L.append(f"| {tid} | {prio} | — | 无目标函数 | — |")
+                continue
+            for fname_ in funcs:
+                if final_report is not None:
+                    fc = final_report.files.get(str(t.get("file", "")))
+                    fcov = fc.functions.get(str(fname_)) if fc else None
+                    status = ("✅ 已覆盖" if fcov and fcov.hit
+                              else ("❌ 未覆盖" if fcov is not None else "⚠️ 不在覆盖率数据中"))
+                else:
+                    status = "⚠️ 无覆盖率数据"
+                # deterministic case reference: which test functions mention it
+                # (a generated case's name/theme usually embeds the target function name)
+                refs = [fn for f2, fns in sorted(disk_cases.items())
+                        for fn in fns if str(fname_) in (f2 + " " + " ".join(fns))]
+                ref_txt = ", ".join(f"`{r}`" for r in refs[:3]) if refs else "—"
+                L.append(f"| {tid} | {prio} | `{fname_}` | {status} | {ref_txt} |")
+        ghosts = state.get("plan_ghosts") or []
+        if ghosts:
+            L.append("")
+            L.append(f"> ⚠️ 测试计划中有 {len(ghosts)} 个幽灵函数"
+                     f"（源码中不存在，已被确定性剔除）："
+                     + "、".join(f"`{g.get('function')}`" for g in ghosts[:10]))
+        L.append("")
+        L.append("> 覆盖状态来自最终 coverage.json（确定性 gcov 结果）；"
+                 "「引用用例」为用例源码中提及该函数名的用例函数（确定性文本扫描）。")
+        L.append("")
+
+    # ── 6. Suspected product defects (cross-validated, plan 3.1) ──
+    # bug_validation.json (deterministic check) splits report_bug items into
+    # valid (evidence cites an existing file; referenced case actually failed)
+    # and invalid (downgraded -- hallucination suspects never reach the reader).
     bugs: list[dict] = []
+    downgraded: list[dict] = []
     for d in _iter_dirs(run_dir):
+        n = int(d.name.split("_")[1])
         q = _load_json(d / "quality_report.json") or {}
+        bv = _load_json(d / "bug_validation.json")
+        valid_items = {id(item) for item in (bv or {}).get("valid", [])}
         for item in q.get("action_items") or []:
             if item.get("type") == "report_bug":
-                bugs.append({**item, "iter": int(d.name.split("_")[1])})
+                if bv is None or id(item) in valid_items:
+                    bugs.append({**item, "iter": n})
+                # items present in q but absent from valid (when bv exists) are
+                # rendered from bv["invalid"] below (with reason), avoid duplicates
+        for inv in (bv or {}).get("invalid", []):
+            it = inv.get("item") or {}
+            downgraded.append({**it, "iter": n, "reason": inv.get("reason", "")})
     if bugs:
-        sec("疑似产品缺陷（quality-agent 判定，待人工确认）")
+        sec(f"疑似产品缺陷（{len(bugs)} 项经交叉校验，待人工确认）")
         L.append("")
         for b in bugs:
             L.append(f"- **{b.get('file', '?')}**（iter {b['iter']}）：{b.get('suggestion', '')}")
+        L.append("")
+        if downgraded:
+            L.append(f"另有 {len(downgraded)} 项 report_bug **证据不足已降级**"
+                     f"（确定性校验未通过，不计入疑似缺陷）：")
+            for b in downgraded:
+                L.append(f"- ~~{b.get('file', '?')}~~（iter {b['iter']}）：{b.get('reason', '')}")
+            L.append("")
+    elif downgraded:
+        sec("疑似产品缺陷（全部降级）")
+        L.append("")
+        L.append(f"quality-agent 报了 {len(downgraded)} 项 product_suspect，"
+                 f"但确定性交叉校验**全部未通过**（证据引用的文件不存在/用例实际未失败），已降级：")
+        for b in downgraded:
+            L.append(f"- ~~{b.get('file', '?')}~~（iter {b['iter']}）：{b.get('reason', '')}")
         L.append("")
 
     # ── 7. Artifact index ──────────────────────────────────────

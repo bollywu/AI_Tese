@@ -96,10 +96,32 @@ class TestConfirmUnitCoverage:
     def test_auto_yes_confirms(self, tmp_path):
         from aicoverage.loop import _confirm_unit_coverage
         cfg = _mk_cfg(tmp_path, unit_confirm_auto_yes=True)
-        unit = [{"file": "src/url.c", "function": "parse_url_invalid", "evidence": "N3"}]
+        unit = [{"file": "src/url.c", "function": "parse_url_invalid",
+                 "evidence": "N3 错误路径，src/url.c:120 无入口可触达"}]
         res = _confirm_unit_coverage(cfg, _manifest(unit=unit), interactive=False)
         assert len(res["confirmed"]) == 1 and len(res["pending"]) == 0
         assert res["confirmed"][0]["confirmed"] is True
+
+    def test_auto_yes_never_approves_weak_evidence(self, tmp_path):
+        """证据未引用源码位置（file:line）→ 即使 auto_yes 也不核准（新门禁 6.3）。"""
+        from aicoverage.loop import _confirm_unit_coverage
+        cfg = _mk_cfg(tmp_path, unit_confirm_auto_yes=True)
+        unit = [{"file": "src/url.c", "function": "parse_url_invalid", "evidence": "N3"}]
+        res = _confirm_unit_coverage(cfg, _manifest(unit=unit), interactive=False)
+        assert len(res["confirmed"]) == 0
+        assert len(res["pending"]) == 1
+        assert "否决" in res["pending"][0]["evidence"]
+
+    def test_interactive_vetoed_never_prompted(self, tmp_path, monkeypatch):
+        """被否决的声明（弱证据）在交互模式下也不询问，直接待确认。"""
+        from aicoverage.loop import _confirm_unit_coverage
+        cfg = _mk_cfg(tmp_path)
+        unit = [{"file": "a.c", "function": "f1", "evidence": "N3"}]
+        called = []
+        monkeypatch.setattr("builtins.input", lambda *a, **k: called.append(1) or "y")
+        res = _confirm_unit_coverage(cfg, _manifest(unit=unit), interactive=True)
+        assert not called  # 未触发任何交互询问
+        assert len(res["pending"]) == 1
 
     def test_governance_off_confirms(self, tmp_path):
         from aicoverage.loop import _confirm_unit_coverage
@@ -112,8 +134,8 @@ class TestConfirmUnitCoverage:
         from aicoverage.loop import _confirm_unit_coverage
         cfg = _mk_cfg(tmp_path)
         unit = [
-            {"file": "a.c", "function": "f1", "evidence": "N3"},
-            {"file": "b.c", "function": "f2", "evidence": "N5"},
+            {"file": "a.c", "function": "f1", "evidence": "N3 错误路径，a.c:12 无入口"},
+            {"file": "b.c", "function": "f2", "evidence": "N5 死代码，b.c:34 无调用点"},
         ]
         # y for first, N for second
         inputs = iter(["y", "N"])

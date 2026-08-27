@@ -27,6 +27,7 @@ from pathlib import Path
 from . import observability as obs
 from . import state as st
 from .agent_call import call_agent
+from .assertquality import check_assert_quality
 from .build import build as do_build
 from .config import ProjectConfig
 from .docstyle import check_test_docstrings
@@ -252,6 +253,18 @@ def _confirm_unit_coverage(cfg: ProjectConfig, manifest: dict,
       - interactive: prompt y/n per function (default n -> strict, unconfirmed stays pending)
       - non-interactive: auto-approve when unit_confirm_auto_yes, else all stay pending
 
+    2026-08-27 hardening (three deterministic sub-gates, all zero-LLM):
+      a) auto-detection: unit-channel coverage the gen FORGOT to declare is caught
+         statically (Go: *_test.go source classifier; C/C++: AST scan for
+         compile_unit_driver/run_driver calls) and enters pending -- silent bypass
+         is no longer possible;
+      b) evidence gate: a declaration whose evidence cites no concrete source
+         location (file:line) is never auto-approved (auto_yes included) --
+         "e2e 不可达" claims must be verifiable;
+      c) reachability veto: when CodeGraph is enabled and indexed, a declared
+         function proven reachable from the entrypoints is rejected outright
+         (it should be E2E-covered, not unit-covered).
+
     Returns:
         {"confirmed": [...], "pending": [...], "declared": [...]} where each item is a
         dict {file, function, evidence, confirmed}.
@@ -259,46 +272,217 @@ def _confirm_unit_coverage(cfg: ProjectConfig, manifest: dict,
     declared = manifest.get("unit_confirm_required") or []
     is_go = getattr(cfg, "language", "c") == "go"
     auto_unit = _go_unit_tests(cfg, manifest) if (is_go and cfg.e2e_first) else []
+    if not is_go and cfg.e2e_first:
+        auto_unit = _undeclared_unit_channel(cfg, manifest)
+        if auto_unit:
+            print(f"      ⚠️ AST 检测到 {len(auto_unit)} 个未声明的单测通道用例"
+                  f"（compile_unit_driver/run_driver）——自动加入待确认")
     if not declared and not auto_unit:
         return {"confirmed": [], "pending": [], "declared": []}
     if not cfg.require_unit_confirm:
         # governance off: treat all declared as confirmed without human review
         return {"confirmed": [dict(d, confirmed=True) for d in declared],
                 "pending": [], "declared": declared}
-    if not interactive and getattr(cfg, "unit_confirm_auto_yes", False):
+
+    # Deterministic pre-vetoes applied regardless of confirmation mode:
+    #   weak evidence (no source location cited) and CodeGraph-proven e2e-reachability
+    #   can never be auto-approved; they land in pending with the veto reason appended.
+    veto: dict[int, str] = {}   # index into declared -> reason
+    if declared:
+        for i, d in enumerate(declared):
+            reason = _unit_decl_veto_reason(cfg, d)
+            if reason:
+                veto[i] = reason
+        if veto:
+            print(f"      🚫 {len(veto)} 个单测声明被确定性否决"
+                  f"（证据无源码定位 / CodeGraph 证明 e2e 可达），强制进入待确认")
+
+    auto_approvable = (not interactive and getattr(cfg, "unit_confirm_auto_yes", False))
+    if auto_approvable and not veto and not auto_unit:
         return {"confirmed": [dict(d, confirmed=True) for d in declared],
                 "pending": [], "declared": declared}
 
     confirmed: list[dict] = []
     pending: list[dict] = []
-    for d in declared:
+    for i, d in enumerate(declared):
         item = dict(d, confirmed=False)
         loc = f"{d.get('file', '?')}::{d.get('function', '?')}"
         ev = d.get("evidence", "")
-        if interactive:
+        if i in veto:
+            item["evidence"] = f"{ev} ｜[否决] {veto[i]}"
+        elif auto_approvable:
+            item["confirmed"] = True
+        elif interactive:
             print(f"\n  ⚠️ [单测人工确认] gen 用单测覆盖了函数 {loc}")
             if ev:
                 print(f"     证据：{ev}")
+            if not _evidence_cites_source(ev):
+                print("     ⚠️ 证据未引用具体源码位置（file:line），请人工重点核查")
             ans = input("     此函数仅被单测覆盖，确认接受该单测覆盖? [y/N] ").strip().lower()
             item["confirmed"] = ans in ("y", "yes")
         # non-interactive default: not confirmed -> pending
         (confirmed if item["confirmed"] else pending).append(item)
 
-    # Go auto-detection: even if gen forgot to declare, statically classify the generated
-    # *_test.go files; any pure-unit test (no HTTP/net signal) is a coverage source that
-    # needs human confirmation under the Go E2E-first discipline.
+    # Auto-detection: even if gen forgot to declare, statically detected unit-channel
+    # coverage needs human confirmation under the E2E-first discipline:
+    #   - Go: pure-unit *_test.go functions (no HTTP/net signal)
+    #   - C/C++: test functions calling compile_unit_driver/run_driver
     for ut in auto_unit:
         item = dict(ut, confirmed=False)
         loc = f"{ut.get('file', '?')}::{ut.get('function', '?')}"
         if interactive:
-            print(f"\n  ⚠️ [单测人工确认] Go 纯单测覆盖（无 e2e 信号）函数 {loc}")
+            print(f"\n  ⚠️ [单测人工确认] 未声明的单测通道覆盖函数 {loc}")
             if ut.get("evidence"):
                 print(f"     证据：{ut['evidence']}")
-            ans = input("     此函数仅被纯单测覆盖，确认接受该单测覆盖? [y/N] ").strip().lower()
+            ans = input("     此函数仅被单测覆盖，确认接受该单测覆盖? [y/N] ").strip().lower()
             item["confirmed"] = ans in ("y", "yes")
         (confirmed if item["confirmed"] else pending).append(item)
 
     return {"confirmed": confirmed, "pending": pending, "declared": declared}
+
+
+# Evidence must cite a concrete source location: "src/foo.c:123", "foo.go:45",
+# "第123行" or "line 123" -- free-text claims are not verifiable and never
+# auto-approved (2026-08-27 hardening, plan 6.3).
+_SRC_LOC_RE = None
+
+
+def _evidence_cites_source(ev: str) -> bool:
+    import re
+    global _SRC_LOC_RE
+    if _SRC_LOC_RE is None:
+        _SRC_LOC_RE = re.compile(
+            r"[\w./\\-]+\.(?:c|cc|cpp|cxx|h|hpp|hxx|go|py|rs|java)[:：]\s?\d+"
+            r"|\b第\s*\d+\s*行\b|\bline\s*\d+",
+            re.IGNORECASE)
+    return bool(_SRC_LOC_RE.search(ev or ""))
+
+
+def _unit_decl_veto_reason(cfg: ProjectConfig, d: dict) -> str | None:
+    """Deterministic veto reason for a unit-confirm declaration, or None if acceptable.
+
+    1. evidence cites no source location (file:line) -> unverifiable claim;
+    2. CodeGraph enabled+indexed and the function is provably reachable from the
+       configured entrypoints -> it should be E2E-covered, unit is not allowed.
+    """
+    ev = d.get("evidence") or ""
+    func = str(d.get("function") or "").strip()
+    if not _evidence_cites_source(ev):
+        return "证据未引用具体源码位置（file:line），不可自动核准"
+    if func and getattr(cfg, "codegraph_enabled", False):
+        try:
+            from . import callgraph
+            if callgraph.is_indexed(cfg.source_path, cfg.codegraph_index_dir):
+                res = callgraph.trace_batch_to_entrypoints(
+                    cfg.source_path, [func], cfg.codegraph_entrypoints,
+                    index_dir=cfg.codegraph_index_dir)
+                tr = res.get(func)
+                if tr is not None and tr.found:
+                    path = tr.paths[0].render() if tr.paths else ""
+                    return (f"CodeGraph 证明存在从入口到该函数的调用链"
+                            f"（{path}），应走 E2E 而非单测")
+        except Exception:  # noqa: BLE001 — 可达性核验失败不阻断门禁
+            pass
+    return None
+
+
+_UNIT_CHANNEL_FUNCS = ("compile_unit_driver", "run_driver")
+
+
+def _verify_manifest_claims(manifest: dict, report: CoverageReport) -> list[str]:
+    """Zero-LLM anti-hallucination gate: declared-covered functions must actually be hit.
+
+    gen declares coverage in manifest.e2e_functions ([{file, function}]) and
+    manifest.targets ([{file, functions: [...]}]). Any declared function that is
+    absent from the coverage report or has execution_count == 0 is a claim/fact
+    mismatch -- before this check, gen could claim anything and nothing ever
+    compared the claim against the deterministic gcov result.
+    Returns the mismatch list as "file::function" strings.
+    """
+    claims: list[tuple[str, str]] = []
+    for it in manifest.get("e2e_functions") or []:
+        f, name = str(it.get("file") or ""), str(it.get("function") or "")
+        if f and name:
+            claims.append((f, name))
+    for t in manifest.get("targets") or []:
+        f = str(t.get("file") or "")
+        for name in t.get("functions") or []:
+            if f and name:
+                claims.append((f, str(name)))
+    mismatch: list[str] = []
+    for f, name in claims:
+        fc = report.files.get(f)
+        fn = fc.functions.get(name) if fc else None
+        if fn is None or fn.execution_count == 0:
+            mismatch.append(f"{f}::{name}")
+    return sorted(set(mismatch))
+
+
+def _plan_ghost_functions(cfg: ProjectConfig, plan: dict) -> list[dict]:
+    """Validate analyzer's test_plan targets against the real function inventory.
+
+    A plan target referencing a function that does not exist anywhere in the
+    source (analyzer hallucination) would send gen chasing a ghost. Every target
+    function is checked against source.function_inventory(); a name missing from
+    the whole inventory is reported as {file, function}. Matching is
+    name-anywhere (not file-exact) on purpose: a path-formatting difference must
+    not produce a false ghost.
+    """
+    from .source import function_inventory
+    try:
+        inventory = function_inventory(cfg.source_files(), cfg.source_path)
+    except Exception:  # noqa: BLE001 — 清单失败时跳过校验（fail-soft）
+        return []
+    known = {fi.name for fi in inventory}
+    ghosts: list[dict] = []
+    for t in plan.get("targets") or []:
+        f = str(t.get("file") or "")
+        for name in t.get("functions") or []:
+            name = str(name)
+            if name and name not in known:
+                ghosts.append({"file": f, "function": name})
+    return ghosts
+
+
+def _undeclared_unit_channel(cfg: ProjectConfig, manifest: dict) -> list[dict]:
+    """AST-detect test functions exercising the unit channel (C/C++).
+
+    Every test_* function whose body calls compile_unit_driver/run_driver is a
+    unit-coverage source; before this gate existed, gen could simply omit the
+    unit_confirm_required declaration and the coverage entered silently
+    (Go got auto-detection via go_test_scope; this restores parity for C/C++).
+    Detected entries enter the pending ledger even without any declaration.
+    """
+    import ast
+    out: list[dict] = []
+    for f in manifest.get("test_files") or []:
+        p = Path(f)
+        if not p.is_absolute():
+            p = cfg.test_dir / p
+        if not (p.is_file() and p.suffix == ".py"):
+            continue
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8", errors="replace"))
+        except (SyntaxError, OSError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not node.name.startswith("test_"):
+                continue
+            for n in ast.walk(node):
+                if not isinstance(n, ast.Call):
+                    continue
+                fname = (n.func.id if isinstance(n.func, ast.Name)
+                         else (n.func.attr if isinstance(n.func, ast.Attribute) else ""))
+                if fname in _UNIT_CHANNEL_FUNCS:
+                    out.append({
+                        "file": p.name, "function": node.name,
+                        "evidence": "AST 检测到单测通道原子函数调用"
+                                    f"（{fname}）但未在 unit_confirm_required 声明",
+                    })
+                    break
+    return out
 
 
 def _go_unit_tests(cfg: ProjectConfig, manifest: dict) -> list[dict]:
@@ -342,7 +526,7 @@ manifest 声明的文件：{json.dumps(files, ensure_ascii=False)}
 
 def _prompt_quality(run_id: str, iter_n: int, iter_dir: Path,
                     execution: dict, known_badcases: str = "",
-                    *, is_go: bool = False) -> str:
+                    *, is_go: bool = False, extra_note: str = "") -> str:
     log_ref = (iter_dir / "gotest.log") if is_go else (iter_dir / "pytest.log")
     junit_ref = "" if is_go else f"junit：{iter_dir / 'junit.xml'}\n"
     return f"""分析本轮执行失败（run_id={run_id} iter={iter_n}）。
@@ -351,10 +535,16 @@ def _prompt_quality(run_id: str, iter_n: int, iter_dir: Path,
 {junit_ref}测试日志：{log_ref}
 覆盖率：{iter_dir / "coverage.json"}
 测试目录/harness/源码路径：见环境变量 AICOV_TEST_DIR / AICOV_SRC
-{known_badcases}
+{known_badcases}{extra_note}
 按失败归因分类逐个分析，产出 → {iter_dir / "quality_report.json"}
 （含 badcase_candidates 字段：只提议**新的**可泛化失败模式，与上方已知条目
-同模式的不重复提议；无新模式输出空数组。）"""
+同模式的不重复提议；无新模式输出空数组。）
+
+失败归因判定顺序（强制决策树，防误判）：
+1. 先判 env_blocked / infra（环境/框架问题——跳过理由、收集错误、fixture 失败）
+2. 再判 flaky（优先用执行结果里的 flaky_cases 事实性证据，勿凭感觉）
+3. 再判 case_bug（必须给出"源码行为 vs 用例预期"的具体矛盾点 file:line）
+4. 以上都不是、且输入合法但行为与源码逻辑矛盾 → 才允许 product_suspect（附复现命令与证据链）"""
 
 
 # ── Main loop ────────────────────────────────────────────────────────
@@ -447,6 +637,27 @@ async def run_loop(
                           run_dir, 0, "analyze")
         plan = _read_json(run_dir / "test_plan.json")
         if plan and plan.get("targets"):
+            # Zero-LLM ghost-function gate (2026-08-27 hardening): every plan target
+            # function must exist in the real function inventory. Hallucinated names
+            # are stripped from what gen ever sees and disclosed via diagnostic.
+            ghosts = _plan_ghost_functions(cfg, plan)
+            if ghosts:
+                obs.emit_diagnostic(
+                    "PLAN_GHOST_FUNCTION", run_id,
+                    message=f"测试计划引用了 {len(ghosts)} 个源码中不存在的函数（已确定性剔除）",
+                    stage="analyze", runs_dir=runs_dir,
+                    context={"ghosts": ghosts[:20]})
+                st.update_state(runs_dir, run_id, {"plan_ghosts": ghosts})
+                ghost_set = {(g.get("file"), g.get("function")) for g in ghosts}
+                kept = []
+                for t in plan["targets"]:
+                    t = dict(t)
+                    t["functions"] = [fn for fn in (t.get("functions") or [])
+                                      if (t.get("file"), str(fn)) not in ghost_set]
+                    if t.get("functions"):
+                        kept.append(t)
+                plan["targets"] = kept
+                print(f"  ⚠️ 计划含 {len(ghosts)} 个幽灵函数（源码中不存在），已剔除")
             plan_summary = json.dumps(plan["targets"][:30], ensure_ascii=False)
             print(f"  ✅ 分析完成：{len(plan['targets'])} 个测试目标")
         else:
@@ -682,24 +893,31 @@ async def run_loop(
                 "verdict": "fail", "problems": [],
                 "summary": "verify-agent 未产出报告",
             }
-            # Docstring header gate is pytest-specific; Go test functions have no
-            # docstrings, so it is skipped for Go projects.
+            # Deterministic zero-LLM gates (merged into verify_report.json):
+            #   - docstyle EC-07: docstring 描述/测试点 header fields
+            #   - assertquality EC-08: tautological/weak/missing assertions
+            # (both are pytest-specific; Go *_test.go has neither docstrings nor
+            #  harness atomic functions, so both are skipped for Go projects)
             doc_problems = ([] if cfg.language == "go"
                             else check_test_docstrings(cfg.test_dir, manifest.get("test_files", [])))
-            if doc_problems:
-                report["problems"] = list(report.get("problems", [])) + doc_problems
+            aq_problems = ([] if cfg.language == "go"
+                           else check_assert_quality(cfg.test_dir, manifest.get("test_files", [])))
+            gate_problems = doc_problems + aq_problems
+            if gate_problems:
+                report["problems"] = list(report.get("problems", [])) + gate_problems
                 report["verdict"] = "fail"
                 (iter_dir / "verify_report.json").write_text(
                     json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
-                print(f"      ⚠️ 文档头门禁未过：{len(doc_problems)} 个用例缺少"
-                      "「描述/测试点」docstring")
+                print(f"      ⚠️ 确定性门禁未过：文档头 {len(doc_problems)} 处 /"
+                      f" 断言质量 {len(aq_problems)} 处")
             problems = report.get("problems", [])
             errors = [p for p in problems if p.get("severity") == "error"]
             obs.emit("stage.exit", run_id, iter_n=iter_n, stage="verify",
                      runs_dir=runs_dir,
                      data={"verdict": report.get("verdict"),
                            "errors": len(errors), "warns": len(problems) - len(errors),
-                           "doc_gate_violations": len(doc_problems)})
+                           "doc_gate_violations": len(doc_problems),
+                           "assert_gate_violations": len(aq_problems)})
             if report.get("verdict") == "pass":
                 verify_ok = True
                 print(f"      ✅ 审查通过（warn {len(problems)}）")
@@ -745,21 +963,44 @@ async def run_loop(
                  data=execution.to_dict())
         print(f"      verdict={execution.verdict} "
               f"tests={execution.tests} fail={execution.failures} err={execution.errors} "
-              f"({execution.duration_s:.1f}s)")
+              f"skip={execution.skipped}"
+              + (f" flaky={len(execution.flaky_cases)}" if execution.flaky_cases else "")
+              + f" ({execution.duration_s:.1f}s)")
+        # High skip rate is a partial "nothing verified" signal: skipped cases
+        # produce no evidence. Diagnose it and force quality analysis even when
+        # the overall verdict is PASS (2026-08-27 hardening).
+        skip_rate = (execution.skipped / execution.tests) if execution.tests else 0.0
+        if execution.tests and skip_rate > 0.30:
+            obs.emit_diagnostic(
+                "HIGH_SKIP_RATE", run_id,
+                message=f"iter {iter_n} 用例跳过率 {skip_rate:.0%}"
+                        f"（{execution.skipped}/{execution.tests}）——被跳过的用例未产生任何验证",
+                iter_n=iter_n, stage="execute", runs_dir=runs_dir,
+                context={"skip_rate": round(skip_rate, 3),
+                         "skipped": execution.skipped, "tests": execution.tests})
         st.update_iteration(runs_dir, run_id, iter_n, {
             "execute_verdict": execution.verdict,
             "gen_output": "ok",
+            **({"skip_rate": round(skip_rate, 3)} if execution.tests else {}),
         })
 
-        # [e] quality analysis (when not PASS)
-        if execution.verdict != "PASS":
+        # [e] quality analysis (when not PASS, or skip rate suspiciously high)
+        if execution.verdict != "PASS" or (execution.tests and skip_rate > 0.30):
             print("  [e] 失败分析（quality-agent）")
             obs.emit("stage.enter", run_id, iter_n=iter_n, stage="quality", runs_dir=runs_dir)
             from .badcase import badcase_hint
+            skip_note = (f"\n⚠️ 本轮跳过率 {skip_rate:.0%}"
+                         f"（{execution.skipped}/{execution.tests}）：请逐个查看 pytest.log 中"
+                         f"被跳过用例的 skip 理由，归因到 env_blocked（二进制缺失/环境不满足）"
+                         f"或 case 问题，并给出修复建议。\n" if execution.tests and skip_rate > 0.30 else "")
+            flaky_note = (f"\n⚠️ 确定性 flaky 复检：以下用例两次运行结果不一致（事实性 flaky 证据，"
+                          f"直接标 flaky 勿猜）：{execution.flaky_cases}\n"
+                          if execution.flaky_cases else "")
             await _call("quality-agent",
                         _prompt_quality(run_id, iter_n, iter_dir, execution.to_dict(),
                                         known_badcases=badcase_hint(cfg),
-                                        is_go=(cfg.language == "go")),
+                                        is_go=(cfg.language == "go"),
+                                        extra_note=skip_note + flaky_note),
                         iter_dir, iter_n, "quality", retries=1)
             quality = _read_json(iter_dir / "quality_report.json")
             obs.emit("stage.exit", run_id, iter_n=iter_n, stage="quality",
@@ -769,6 +1010,19 @@ async def run_loop(
                 quality_actions = quality.get("action_items", [])
                 print(f"      verdict={quality.get('verdict')} "
                       f"action_items={len(quality_actions)}")
+                # Bug cross-validation (plan 3.1, zero LLM): every report_bug item is
+                # checked against hard facts (cited file exists; referenced case
+                # actually failed). Invalid ones are downgraded out of the final
+                # report's "suspected defects" section -- hallucinated bugs must
+                # not reach the reader.
+                from .bugcheck import validate_bug_reports
+                bv = validate_bug_reports(cfg, quality, execution.cases)
+                if bv["valid"] or bv["invalid"]:
+                    (iter_dir / "bug_validation.json").write_text(
+                        json.dumps(bv, ensure_ascii=False, indent=1), encoding="utf-8")
+                if bv["invalid"]:
+                    print(f"      🚫 {len(bv['invalid'])} 个 report_bug 证据不足已降级"
+                          f"（{len(bv['valid'])} 个有效保留）")
                 # badcase accumulation (LLM proposes -> deterministic code adjudicates into the library)
                 candidates = quality.get("badcase_candidates") or []
                 if candidates:
@@ -819,6 +1073,56 @@ async def run_loop(
         if target_functions:
             print(f"      （全量参考：func={current_full.func_pct:.2f}% "
                   f"cond={current_full.cond_pct:.2f}%）")
+
+        # Claim-vs-fact gate (zero LLM, 2026-08-27 hardening): every function gen
+        # declared covered (e2e_functions / targets) must actually have
+        # execution_count > 0 in the gcov report. A mismatch is a declaration/fact
+        # divergence -> state + diagnostic + reflux to next round's gen.
+        if execution.coverage_path and execution.coverage_path.exists():
+            claim_miss = _verify_manifest_claims(manifest, current_full)
+            if claim_miss:
+                print(f"      ⚠️ 声明与事实不符：{len(claim_miss)} 个函数声明已覆盖但 gcov 未命中")
+                st.update_iteration(runs_dir, run_id, iter_n,
+                                    {"claim_mismatch": claim_miss})
+                obs.emit_diagnostic(
+                    "CLAIM_MISMATCH", run_id,
+                    message=f"iter {iter_n} manifest 声明覆盖但实际未命中 {len(claim_miss)} 个函数",
+                    iter_n=iter_n, stage="update", runs_dir=runs_dir,
+                    context={"functions": claim_miss[:20]})
+                quality_actions.append({
+                    "type": "claim_mismatch", "functions": claim_miss,
+                    "suggestion": "以下函数被声明为已覆盖但 gcov 显示未命中："
+                                  "要么修复用例使其真正触达，要么在 manifest 中如实更正声明"})
+
+        # E2E-first unit-ratio quota (2026-08-27 hardening): unit-covered share of
+        # this round's newly-hit functions above max_unit_ratio -> diagnostic +
+        # hard e2e-first instruction refluxed into the next gen round.
+        if cfg.e2e_first and delta.get("newly_hit"):
+            newly = {(d["file"], d["name"]) for d in delta["newly_hit"]}
+            unit_claims = {(str(u.get("file")), str(u.get("function")))
+                           for u in manifest.get("unit_confirm_required") or []}
+            unit_new = newly & unit_claims
+            if newly and unit_new:
+                ratio = len(unit_new) / len(newly)
+                quota = getattr(cfg, "max_unit_ratio", 0.15)
+                if ratio > quota:
+                    print(f"      ⚠️ 单测覆盖占比 {ratio:.0%} 超过配额 {quota:.0%}"
+                          f"（{len(unit_new)}/{len(newly)}）")
+                    st.update_iteration(runs_dir, run_id, iter_n,
+                                        {"unit_ratio": round(ratio, 3)})
+                    obs.emit_diagnostic(
+                        "UNIT_RATIO_EXCEEDED", run_id,
+                        message=f"iter {iter_n} 新增命中中单测覆盖占比 {ratio:.0%} 超过配额 {quota:.0%}",
+                        iter_n=iter_n, stage="update", runs_dir=runs_dir,
+                        context={"ratio": round(ratio, 3), "quota": quota,
+                                 "unit_functions": sorted(f"{f}::{n}" for f, n in unit_new)[:20]})
+                    quality_actions.append({
+                        "type": "unit_ratio_exceeded", "ratio": round(ratio, 3),
+                        "functions": sorted(f"{f}::{n}" for f, n in unit_new),
+                        "suggestion": f"本轮新增命中中单测覆盖占比 {ratio:.0%} 超过配额 {quota:.0%}："
+                                      f"下一轮必须优先尝试 e2e 触发路径（run_binary），"
+                                      f"把上述函数从单测改为 e2e 覆盖"})
+
         previous = current_full   # 迭代间比较始终基于全量快照，scope 视图按需现算
 
         if st.check_threshold(state := st.load_loop_state(runs_dir, run_id), iter_n):

@@ -81,11 +81,21 @@ class ProjectConfig:
     test_dirname: str = "tests"              # test dir name (relative to source_path)
     test_python: str = "auto"                # interpreter for pytest: auto | absolute path
     test_timeout: int = 600                  # per-pytest timeout (sec), must be > 0
+    flaky_rerun: bool = True                 # on case failure, re-run once and diff per-case
+                                             # status -> deterministic flaky evidence
+                                             # (execution.json: flaky_cases)
 
     # ── Coverage (gcov) ───────────────────────────────────────
     gcov_bin: str = "gcov"
     func_target: float = 100.0
     cond_target: float = 85.0
+    max_unit_ratio: float = 0.15             # E2E-first quota: unit-covered share of newly-hit
+                                             # functions above this emits UNIT_RATIO_EXCEEDED
+                                             # and forces an e2e-first hint into the next gen round
+    bug_base_compare: bool = False           # MR loop: re-run failing cases against base_ref in
+                                             # an isolated git worktree; pass@base+fail@head =
+                                             # regression_confirmed (factual attribution). Costs
+                                             # one extra build per failing batch, hence opt-in.
 
     # ── Go coverage backend (only used when language == "go") ──
     # Go's toolchain instruments natively via `go test -coverprofile`, so no
@@ -373,9 +383,12 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
         test_dirname=str(test.get("dir", "tests")).strip() or "tests",
         test_python=str(test.get("python", "auto")).strip(),
         test_timeout=int(test.get("timeout", 600)),
+        flaky_rerun=bool(test.get("flaky_rerun", True)),
         gcov_bin=str(cov.get("gcov_bin", "gcov")).strip(),
         func_target=float(cov.get("func_target", 100.0)),
         cond_target=float(cov.get("cond_target", 85.0)),
+        max_unit_ratio=float(cov.get("max_unit_ratio", 0.15)),
+        bug_base_compare=bool(cov.get("bug_base_compare", False)),
         e2e_first=bool(cov.get("e2e_first", True)),
         require_unit_confirm=bool(cov.get("require_unit_confirm", True)),
         unit_confirm_auto_yes=bool(cov.get("unit_confirm_auto_yes", False)),

@@ -129,14 +129,21 @@ def test_ut_parse_url_invalid():
   "modified_files": [],
   "targets": [{"file": "src/stats.c", "functions": ["stats_summary"]}],
   "e2e_functions": [{"file": "src/stats.c", "function": "stats_summary"}],
+  "assertion_evidence": [
+    {"test": "test_stats_latency_summary", "assertion": "stdout 含 Latency 行", "source": "src/stats.c:88 printf(\"Latency...\")"}
+  ],
   "unit_confirm_required": [
-    {"file": "src/url.c", "function": "parse_url_invalid", "evidence": "错误路径 N3，二进制无入口可触达"}
+    {"file": "src/url.c", "function": "parse_url_invalid", "evidence": "错误路径 N3，src/url.c:120 二进制无入口可触达"}
   ],
   "summary": "本轮生成 N 个用例，覆盖 stats_summary 的正常/超时分支"
 }
 ```
 
 - `e2e_functions`：本轮通过黑盒 E2E（run_binary）覆盖的目标函数（非空时可缺省，但建议声明）。
+- `assertion_evidence`：**断言溯源**——每个用例中决定 PASS/FAIL 的关键断言，逐条给出预期值
+  的源码依据（`file:line`）。verify-agent 按 this 字段**全量核对**（不再抽查），缺溯源会被
+  要求返工。恒真/弱断言（匹配串过短、`assert_gt(x, -1)`、`assert_eq(a, a)`、匹配任意串的
+  正则）会被确定性门禁 EC-08 直接拦截判 fail。
 - `unit_confirm_required`：**通过单测通道（compile_unit_driver）覆盖、需要人工确认的函数**，
   每项含 `file`/`function`/`evidence`（为什么 e2e 不可达）。**e2e-first 纪律下，所有单测覆盖
   必须在此声明，否则该单测视为无效；声明后由闭环人工确认门禁逐个审核。**

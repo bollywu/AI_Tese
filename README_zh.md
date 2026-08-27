@@ -168,8 +168,8 @@ aicov html --from-json path/to/coverage.json --out ./report
 | `[source]` | path / include_globs / exclude_globs | 源码根；参与统计的文件 glob（Go 默认 `**/*.go`） |
 | `[build]` | clean_cmd / build_cmd / binary | 构建命令（**必须含 `--coverage` 插桩**，构建后会校验 `.gcno` 生成）；产物路径 — **Go 项目不需要** |
 | `[go]` | go_bin / packages / build_tags / coverprofile | Go 后端：`go` 可执行文件；测试包（默认 `./...`）；额外 `-tags`；coverprofile 输出路径 |
-| `[test]` | dir / python / timeout | pytest 目录（C/C++）；解释器（auto=探测）；整体超时（>0） |
-| `[coverage]` | gcov_bin / func_target / cond_target / e2e_first / require_unit_confirm / unit_confirm_auto_yes | gcov 可执行文件（仅 C/C++）；达标线；E2E 优先治理与单测人工确认 |
+| `[test]` | dir / python / timeout / flaky_rerun | pytest 目录（C/C++）；解释器（auto=探测）；整体超时（>0）；失败时确定性重跑一次做 flaky 复检 |
+| `[coverage]` | gcov_bin / func_target / cond_target / e2e_first / require_unit_confirm / unit_confirm_auto_yes / max_unit_ratio / bug_base_compare | gcov 可执行文件（仅 C/C++）；达标线；E2E 优先治理与单测人工确认；单测覆盖占比配额；MR 失败用例 base 版本对照（opt-in） |
 | `[loop]` | max_iter / no_progress_stop | 最大迭代；连续无增长轮数（早停） |
 | `[llm]` | model / gen_model / max_turns / max_verify_retry | 模型配置；max_turns=单次 agent 最大工具轮次（复杂项目建议 ≥120）；max_verify_retry=verify 失败修复回环次数（复杂项目建议 3） |
 | `[knowledge]` | kb_dir / badcase_dir / few_shots_dir / prompts_dir | 按项目自备的知识资源；prompts_dir 可整份覆盖内置 prompt |
@@ -193,6 +193,21 @@ your-project/
 **单测通道（e2e 不可达函数转单测）**：某些函数无法通过被测二进制的正常 E2E 流程触达（gap 根因 N1 特定运行环境/多进程/信号、N3 错误路径、N5 死代码/平台相关/无调用点）。此时 gen-agent 会生成 `test_driver_*.c` 直接调用目标函数，用 harness 的 `compile_unit_driver()`（`--coverage` 插桩）+ `run_driver()` 编译运行单测二进制，让 gcov 采集到该函数。因为 gcov 按源码树扫 `.gcno/.gcda`，单测通道与现有采集完全兼容，无需改采集逻辑。单测编译配置见 `aicoverage.toml` 的 `[unittest]` 段（compiler / flags / link_libs / obj_dir）。
 
 **E2E 优先覆盖治理 + 单测人工确认（2026-08-27）**：所有覆盖必须先通过 E2E 实现；确实无法 E2E 触达、必须用单测覆盖的函数，需**显式人工确认**后才算数。gen-agent 把每个单测覆盖函数声明进 `manifest.unit_confirm_required`（含"为何 e2e 不可达"的证据）；闭环运行人工确认门禁（交互模式逐函数 y/n；CI 可用 `unit_confirm_auto_yes` 自动放行）；最终报告列出所有**待人工确认**的单测覆盖。可在 `[coverage]` 配置：`e2e_first`、`require_unit_confirm`、`unit_confirm_auto_yes`。
+
+**测试质量加固（2026-08-27，全部确定性零 LLM 门禁，详见 `docs/PLAN_test_quality_hardening.md`）**：
+
+- **逐 issue 裁决**：扫描轨复现用例按各自 `test_function` 的执行结果独立裁决，杜绝"一个用例 FAIL 全部 issue 坐实"的张冠李戴
+- **all-skip 门禁**：全部用例被跳过（rc=0）→ `BLOCKED/all_skipped` 而非假 PASS；跳过率 >30% 发 `HIGH_SKIP_RATE` 并强制 quality 分析
+- **恒真断言门禁（EC-08）**：`assertquality.py` 纯 AST 检测无断言/匹配串过短/`assert_gt(x,-1)`/`assert_eq(a,a)`/匹配任意串正则等恒真模式，verify 阶段自动拦截
+- **issue 绑定门禁（EC-10）**：扫描轨复现用例 docstring 必须含 `issue_id:` 字段
+- **claim 校验**：manifest 声明已覆盖但 gcov 未命中的函数 → `CLAIM_MISMATCH` 诊断 + 回流 gen 修复
+- **计划幽灵函数校验**：analyzer 的 test_plan 引用源码中不存在的函数 → `PLAN_GHOST_FUNCTION` + 确定性剔除
+- **C/C++ 单测通道自动检测**：AST 扫 `compile_unit_driver/run_driver` 调用，gen 漏声明 `unit_confirm_required` 也会被抓进待确认（与 Go `_go_unit_tests` 对等）
+- **单测配额**：新增命中中单测占比超 `max_unit_ratio`（默认 15%）→ `UNIT_RATIO_EXCEEDED` + 下轮强制 e2e-first 提示；单测证据必须引用 `file:line`，CodeGraph 证明入口可达的函数直接驳回单测申请
+- **flaky 确定性复检**：失败时自动重跑一次 diff 逐用例状态，`flaky_cases` 落盘 execution.json（事实证据非 LLM 猜测）
+- **执行前置自检**：二进制缺失/测试文件语法错误 → 秒级 BLOCKED，不浪费整轮 pytest
+- **bug 交叉校验**：quality 报的 `report_bug` 逐条核对证据（引用文件存在 + 用例确实失败），不足者降级不入最终报告；MR 场景可开 `bug_base_compare` 用 git worktree 在 base 版本重跑失败用例（pass@base+fail@head = 本次变更引入的回归）
+- **报告增强**：需求覆盖追溯矩阵（需求→函数→覆盖状态→引用用例）、覆盖来源构成（E2E vs 单测占比）、claim mismatch/flaky/skip 率披露
 
 **Go 项目同样遵循 E2E-first**：gen 必须优先写集成测试（`httptest`/`gin` 起 server 走真实 HTTP 链路），纯单测（直接调方法、注入内存/mock 依赖）需人工确认。`aicoverage/go_test_scope.py` 静态判定每个 `*_test.go` 测试函数为 `e2e`（有 HTTP/网络信号）或 `unit`（无网络信号）；即使 gen 忘了声明，闭环也会自动识别纯单测并纳入人工确认门禁。
 
@@ -268,6 +283,8 @@ AIcoverage/
 │   ├── kb.py             # 代码知识库构建（wiki，wikirize 方法论）
 │   ├── badcase.py        # badcase 自回归沉淀（LLM 提议、代码裁决）
 │   ├── docstyle.py       # 用例文档头确定性门禁（描述+测试点）
+│   ├── assertquality.py  # 恒真/弱断言确定性门禁（EC-08/EC-10）
+│   ├── bugcheck.py       # report_bug 交叉校验 + base 版本回归对照
 │   ├── finalreport.py    # 最终 Markdown 报告（增量/执行/用例/未覆盖原因/产物索引）
 │   ├── htmlreport.py     # HTML 覆盖率报告（源码逐行着色）
 │   ├── state.py          # loop_state.json

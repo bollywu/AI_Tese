@@ -18,17 +18,32 @@ import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import ProjectConfig
 from .gcov import clean_gcda, collect as gcov_collect
 
+# Worst-status merge order when several junit <testcase> entries map to the same
+# bare test-function name (parametrized cases): a single failure marks the function.
+_WORST_ORDER = {"pass": 0, "skipped": 1, "error": 2, "fail": 3}
+
+
+def _bare_case_name(name: str) -> str:
+    """Bare test-function name: strip file/class prefixes, parametrize brackets
+    and Go subtest suffixes.
+
+    "test_foo[param0]" -> "test_foo"; "tests/test_x.py::test_foo" -> "test_foo";
+    "TestD/sub_case" (go test -v subtest) -> "TestD".
+    """
+    n = name.split("::")[-1]
+    return n.split("[", 1)[0].split("/", 1)[0].strip()
+
 
 @dataclass
 class ExecutionResult:
     verdict: str                 # PASS | FAIL | BLOCKED
-    failure_kind: str = "none"   # none | case_fail | env_blocked | timeout_blocked
+    failure_kind: str = "none"   # none | case_fail | env_blocked | timeout_blocked | all_skipped
 
     tests: int = 0
     failures: int = 0
@@ -39,6 +54,14 @@ class ExecutionResult:
     coverage_path: Path | None = None
     log_path: Path | None = None
     detail: str = ""
+    # Per-case results keyed by bare test-function name -> worst status
+    # ("pass" | "fail" | "error" | "skipped"). Populated from junit.xml (C/C++) or
+    # `--- PASS/FAIL:` lines (Go). Lets consumers (scan-track adjudication, quality)
+    # attribute an outcome to ONE case instead of the whole-run verdict.
+    cases: dict[str, str] = field(default_factory=dict)
+    # Cases whose status flipped between the main run and the deterministic flaky
+    # re-run (see _flaky_rerun). Empty when no re-run happened or re-run was skipped.
+    flaky_cases: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -49,6 +72,8 @@ class ExecutionResult:
             "junit": str(self.junit_path) if self.junit_path else None,
             "coverage": str(self.coverage_path) if self.coverage_path else None,
             "detail": self.detail,
+            "cases": self.cases,
+            "flaky_cases": self.flaky_cases,
         }
 
 
@@ -95,6 +120,118 @@ def _parse_junit(junit_path: Path) -> tuple[int, int, int, int]:
         return t, f, e, s
     except (ET.ParseError, OSError, ValueError):
         return 0, 0, 0, 0
+
+
+def _parse_junit_cases(junit_path: Path) -> dict[str, str]:
+    """Parse junit.xml -> {bare_test_function_name: worst_status}.
+
+    Status per <testcase>: "fail" (has <failure/>), "error" (has <error/>),
+    "skipped" (has <skipped/>), else "pass". Parametrized cases sharing one
+    function name merge to the worst status, so callers can look a result up by
+    the bare function name (e.g. manifest's test_function declaration).
+    """
+    cases: dict[str, str] = {}
+    try:
+        root = ET.parse(junit_path).getroot()
+    except (ET.ParseError, OSError):
+        return cases
+    for tc in root.iter("testcase"):
+        name = _bare_case_name(tc.get("name", ""))
+        if not name:
+            continue
+        if tc.find("failure") is not None:
+            status = "fail"
+        elif tc.find("error") is not None:
+            status = "error"
+        elif tc.find("skipped") is not None:
+            status = "skipped"
+        else:
+            status = "pass"
+        prev = cases.get(name)
+        if prev is None or _WORST_ORDER[status] > _WORST_ORDER[prev]:
+            cases[name] = status
+    return cases
+
+
+# soft-dependency probe cache: {interpreter: pytest_timeout available?}
+_TIMEOUT_PROBE: dict[str, bool] = {}
+
+
+def _has_pytest_timeout(py: str) -> bool:
+    """Whether the interpreter has pytest-timeout installed (probed once per py)."""
+    if py not in _TIMEOUT_PROBE:
+        try:
+            proc = subprocess.run([py, "-c", "import pytest_timeout"],
+                                  capture_output=True, timeout=30)
+            _TIMEOUT_PROBE[py] = proc.returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            _TIMEOUT_PROBE[py] = False
+    return _TIMEOUT_PROBE[py]
+
+
+def _preflight_check(cfg: ProjectConfig, test_files: list[Path] | None) -> str | None:
+    """Deterministic fail-fast checks before spending a full pytest run.
+
+    Returns a blocking detail string, or None when all checks pass:
+      1. instrumented binary exists (C/C++ only) -- the #1 root cause of the
+         "all cases skipped but verdict=PASS" false positive (conftest skips when
+         the binary is missing, and pytest exits 0 on all-skip);
+      2. every test file to run is syntactically valid Python (a gen-produced
+         broken file would otherwise fail pytest collection with an obscure error).
+    """
+    if getattr(cfg, "language", "c") != "go":
+        bp = cfg.binary_path
+        if bp is not None and not bp.exists():
+            return (f"被测二进制不存在: {bp}（先 aicov build；"
+                    f"否则 conftest 会 skip 全部用例形成假 PASS）")
+    import ast
+    files = test_files if test_files else (
+        sorted(cfg.test_dir.glob("test_*.py")) if cfg.test_dir.is_dir() else [])
+    broken: list[str] = []
+    for p in files:
+        try:
+            ast.parse(p.read_text(encoding="utf-8", errors="replace"), filename=str(p))
+        except SyntaxError as e:
+            broken.append(f"{p.name}:{e.lineno}")
+        except OSError:
+            broken.append(f"{p.name}(不可读)")
+    if broken:
+        return f"测试文件语法错误，pytest 无法收集: {', '.join(broken[:5])}"
+    return None
+
+
+def _flaky_rerun(cfg: ProjectConfig, iter_dir: Path, cmd: list[str],
+                 timeout: int, cases_before: dict[str, str]) -> list[str]:
+    """Deterministic flaky detection: re-run the suite once and diff per-case status.
+
+    A case failing in one run but passing in the other (or vice versa) is flaky
+    with factual evidence; cases failing in BOTH runs are stable failures. Returns
+    the flaky function-name list (empty when the re-run itself is inconclusive:
+    timeout / no junit). Artifacts land in junit_rerun.xml / pytest_rerun.log.
+    """
+    rerun_junit = iter_dir / "junit_rerun.xml"
+    rerun_log = iter_dir / "pytest_rerun.log"
+    full_cmd = list(cmd)
+    full_cmd[full_cmd.index("--junitxml") + 1] = str(rerun_junit)
+    try:
+        proc = subprocess.run(
+            full_cmd, cwd=str(cfg.source_path), capture_output=True, text=True,
+            timeout=timeout, env=_build_env(cfg),
+        )
+        log = (proc.stdout or "") + ("\n[stderr]\n" + proc.stderr if proc.stderr else "")
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        rerun_log.write_text(f"TIMEOUT after {timeout}s\n{out}", encoding="utf-8")
+        return []
+    rerun_log.write_text(log, encoding="utf-8")
+    if not rerun_junit.exists():
+        return []
+    cases_after = _parse_junit_cases(rerun_junit)
+    if not cases_after:
+        return []
+    failed_before = {n for n, s in cases_before.items() if s in ("fail", "error")}
+    failed_after = {n for n, s in cases_after.items() if s in ("fail", "error")}
+    return sorted(failed_before ^ failed_after)
 
 
 def run_tests(
@@ -178,6 +315,9 @@ def run_go_tests(
     passed, failed = _parse_go_test_output(log)
     result.tests = passed + failed
     result.failures = failed
+    # Per-case status from `--- PASS/FAIL/SKIP:` lines (subtests merge into parent,
+    # worst-of). Go run has no junit, so this is the per-case source for adjudication.
+    result.cases = _parse_go_cases(log)
 
     if collect_coverage and coverprofile.exists():
         from .go_cover import collect_go
@@ -194,7 +334,14 @@ def run_go_tests(
         result.failure_kind = "timeout_blocked"
         result.detail = f"go test 超过 {timeout}s 被强制终止"
     elif rc == 0:
-        result.verdict = "PASS"
+        # all-skip guard: go test exits 0 when every test skipped -- same false-PASS
+        # shape as the pytest case (a skipped test verifies nothing)
+        if result.cases and all(s == "skipped" for s in result.cases.values()):
+            result.verdict = "BLOCKED"
+            result.failure_kind = "all_skipped"
+            result.detail = f"全部 {len(result.cases)} 个 Go 用例被跳过——未真正验证任何行为"
+        else:
+            result.verdict = "PASS"
     elif _go_env_blocked(log):
         result.verdict = "BLOCKED"
         result.failure_kind = "env_blocked"
@@ -233,6 +380,37 @@ def _parse_go_test_output(log: str) -> tuple[int, int]:
     return passed, failed
 
 
+def _parse_go_cases(log: str) -> dict[str, str]:
+    """Parse `go test -v` output -> {bare_test_name: worst_status}.
+
+    Lines look like `--- PASS: TestFoo (0.01s)` / `--- FAIL: TestFoo/sub_case`.
+    Subtest names ("TestFoo/sub") merge into the parent ("TestFoo"), worst-of --
+    a failing subtest marks the parent function failed.
+    """
+    cases: dict[str, str] = {}
+    for line in log.splitlines():
+        s = line.strip()
+        status = None
+        if s.startswith("--- PASS:"):
+            status = "pass"
+        elif s.startswith("--- FAIL:"):
+            status = "fail"
+        elif s.startswith("--- SKIP:"):
+            status = "skipped"
+        if status is None:
+            continue
+        rest = s.split(":", 1)[1].strip()
+        if not rest:
+            continue
+        name = _bare_case_name(rest.split()[0])
+        if not name:
+            continue
+        prev = cases.get(name)
+        if prev is None or _WORST_ORDER[status] > _WORST_ORDER[prev]:
+            cases[name] = status
+    return cases
+
+
 def _go_env_blocked(log: str) -> bool:
     """Heuristic: Go compile/build errors indicate an environment problem, not a test failure."""
     markers = ["build failed", "cannot find package", "no required module provides package",
@@ -266,6 +444,18 @@ def _run_c_tests(
     log_path = iter_dir / "pytest.log"
     coverage_path = iter_dir / "coverage.json"
 
+    # 0. Deterministic pre-flight (fail fast instead of wasting a whole pytest run)
+    block = _preflight_check(cfg, test_files)
+    if block:
+        result.verdict = "BLOCKED"
+        result.failure_kind = "env_blocked"
+        result.detail = block
+        (iter_dir / "execution.json").write_text(
+            __import__("json").dumps(result.to_dict(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return result
+
     py = python or resolve_python(cfg)
     timeout = timeout or cfg.test_timeout
     assert timeout > 0, "test.timeout 必须为正数（0 的语义是瞬间 kill 而非无限等待）"
@@ -281,6 +471,11 @@ def _run_c_tests(
         targets = [cfg.test_dirname]
     cmd = [py, "-m", "pytest", *targets, "-v", "--junitxml", str(junit_path),
            "-p", "no:cacheprovider"]
+    # Per-case timeout when pytest-timeout is installed (soft dependency): one
+    # hanging case then fails itself instead of eating the whole-suite budget
+    # (a suite-level rc=124 marks the ENTIRE round BLOCKED, losing everything).
+    if _has_pytest_timeout(py):
+        cmd += ["--timeout", str(timeout)]
 
     import time
     start = time.time()
@@ -304,6 +499,7 @@ def _run_c_tests(
     if junit_path.exists():
         result.junit_path = junit_path
         result.tests, result.failures, result.errors, result.skipped = _parse_junit(junit_path)
+        result.cases = _parse_junit_cases(junit_path)
 
     # 4. Coverage collection
     # Also attempt collection on timeout (rc=124): although the process was killed,
@@ -327,7 +523,17 @@ def _run_c_tests(
         result.failure_kind = "timeout_blocked"
         result.detail = f"pytest 超过 {timeout}s 被强制终止"
     elif rc == 0:
-        result.verdict = "PASS"
+        # All-skip guard (2026-08-27 hardening): pytest exits 0 even when EVERY case
+        # was skipped, and the scaffold's target fixture skips when the binary is
+        # missing. A bare rc==0->PASS would record a green round that verified
+        # nothing (the classic false positive). All-skip is BLOCKED instead.
+        if result.tests > 0 and result.skipped == result.tests:
+            result.verdict = "BLOCKED"
+            result.failure_kind = "all_skipped"
+            result.detail = (f"全部 {result.tests} 个用例被跳过——未真正验证任何行为"
+                             f"（典型原因：被测二进制缺失 / 环境不满足，见 pytest.log 中 skip 理由）")
+        else:
+            result.verdict = "PASS"
     elif rc in (3, 4, 5) or result.tests == 0:
         # pytest rc: 2=test failures, 3=internal error, 4=usage error, 5=no tests collected
         result.verdict = "BLOCKED"
@@ -336,6 +542,16 @@ def _run_c_tests(
     else:
         result.verdict = "FAIL"
         result.failure_kind = "case_fail"
+
+    # 6. Deterministic flaky detection (2026-08-27 hardening): re-run once on case
+    # failure and diff per-case status. Gives quality-agent factual flaky evidence
+    # instead of a guess ("same input, different outcome" is measured, not inferred).
+    if (result.verdict == "FAIL" and getattr(cfg, "flaky_rerun", True)
+            and result.cases):
+        result.flaky_cases = _flaky_rerun(cfg, iter_dir, cmd, timeout, result.cases)
+        if result.flaky_cases:
+            result.detail = (result.detail + " | " if result.detail else "") + \
+                f"flaky 复检：{len(result.flaky_cases)} 个用例两次运行结果不一致"
 
     (iter_dir / "execution.json").write_text(
         __import__("json").dumps(result.to_dict(), indent=2, ensure_ascii=False),

@@ -35,12 +35,19 @@ binary = "{binary}"
 dir = "tests"          # pytest case dir (relative to source.path)
 python = "auto"        # interpreter for pytest; auto=auto-detect
 timeout = 600          # per-pytest timeout (sec, must be >0)
+flaky_rerun = true     # on case failure, re-run once and diff per-case status
+                       # -> deterministic flaky evidence (execution.json: flaky_cases)
 
 [coverage]
 tool = "gcov"
 gcov_bin = "gcov"
 func_target = 100.0
 cond_target = 85.0
+max_unit_ratio = 0.15  # E2E-first quota: unit-covered share of newly-hit functions
+                       # above this emits UNIT_RATIO_EXCEEDED + e2e-first hint to gen
+bug_base_compare = false  # MR loop: re-run failing cases against base_ref in an
+                          # isolated git worktree (pass@base+fail@head = regression
+                          # introduced by the change). Costs one extra build, opt-in.
 
 [unittest]              # optional: E2E-unreachable -> unit test (gap causes N1/N3/N5)
 compiler = ""           # unit-test compiler (empty=follow build system; recommended gcc / g++)

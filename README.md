@@ -172,8 +172,8 @@ The report follows the classic drill-down form of mainstream coverage tools (ifr
 | `[source]` | path / include_globs / exclude_globs | source root; file globs to include in statistics (Go defaults to `**/*.go`) |
 | `[build]` | clean_cmd / build_cmd / binary | build command (**must contain `--coverage` instrumentation**; `.gcno` generation is verified after build); artifact path — **not required for Go** |
 | `[go]` | go_bin / packages / build_tags / coverprofile | Go backend: `go` executable; test packages (default `./...`); extra `-tags`; coverprofile output path |
-| `[test]` | dir / python / timeout | pytest dir (C/C++); interpreter (auto=probe); overall timeout (>0) |
-| `[coverage]` | gcov_bin / func_target / cond_target / e2e_first / require_unit_confirm / unit_confirm_auto_yes | gcov executable (C/C++ only); threshold lines; E2E-first governance & unit-test confirmation |
+| `[test]` | dir / python / timeout / flaky_rerun | pytest dir (C/C++); interpreter (auto=probe); overall timeout (>0); deterministic flaky re-run on failure |
+| `[coverage]` | gcov_bin / func_target / cond_target / e2e_first / require_unit_confirm / unit_confirm_auto_yes / max_unit_ratio / bug_base_compare | gcov executable (C/C++ only); threshold lines; E2E-first governance & unit-test confirmation; unit-coverage ratio quota; MR base-version comparison for failing cases (opt-in) |
 | `[loop]` | max_iter / no_progress_stop | max iterations; consecutive no-growth rounds (early stop) |
 | `[llm]` | model / gen_model / max_turns / max_verify_retry | model configuration; max_turns=per-agent max tool turns (≥120 for complex projects); max_verify_retry=verify fix-loop rounds (3 recommended for complex projects) |
 | `[knowledge]` | kb_dir / badcase_dir / few_shots_dir / prompts_dir | project-specific knowledge resources; prompts_dir can fully override built-in prompts |
@@ -197,6 +197,21 @@ your-project/
 **Unit-test channel (E2E-unreachable → unit test)**: some functions cannot be reached through the normal E2E flow of the binary under test (gap root causes N1 specific runtime env/multi-process/signal, N3 error path, N5 dead code/platform-specific/no call site). In such cases gen-agent generates a `test_driver_*.c` that calls the target function directly, using the harness's `compile_unit_driver()` (`--coverage` instrumentation) + `run_driver()` to build and run a unit-test binary, so gcov picks up that function. Since gcov scans the source tree for `.gcno/.gcda`, the unit-test channel is fully compatible with the existing collection logic — no changes needed there. Unit-test build settings live in the `[unittest]` section of `aicoverage.toml` (compiler / flags / link_libs / obj_dir).
 
 **E2E-first coverage governance + unit-test human confirmation (2026-08-27)**: all coverage must be reached through E2E first; a function that genuinely cannot be E2E-reached may only be covered by a unit test after **explicit human confirmation**. gen-agent declares every unit-test-covered function in `manifest.unit_confirm_required` (with evidence of why E2E is impossible); the loop runs a confirmation gate (interactive y/n per function, or auto-approve via `unit_confirm_auto_yes` for CI); the final report lists every single-test coverage still **pending human confirmation**. Configurable in `[coverage]`: `e2e_first`, `require_unit_confirm`, `unit_confirm_auto_yes`.
+
+**Test-quality hardening (2026-08-27, all deterministic zero-LLM gates; see `docs/PLAN_test_quality_hardening.md`)**:
+
+- **Per-issue adjudication**: scan-track repro cases are adjudicated by each issue's own `test_function` execution result -- no more cross-contamination (one failing case confirming every issue)
+- **All-skip guard**: every case skipped (rc=0) → `BLOCKED/all_skipped` instead of a false PASS; skip rate >30% emits `HIGH_SKIP_RATE` and forces quality analysis
+- **Tautology gate (EC-08)**: `assertquality.py` pure-AST detection of no-assertion / tiny needles / `assert_gt(x,-1)` / `assert_eq(a,a)` / matches-anything regexes, auto-blocked in the verify phase
+- **Issue-binding gate (EC-10)**: scan-track repro cases must carry an `issue_id:` docstring field
+- **Claim-vs-fact check**: functions declared covered in the manifest but never hit by gcov → `CLAIM_MISMATCH` diagnostic + reflux to gen
+- **Plan ghost-function check**: analyzer test_plan referencing functions that don't exist → `PLAN_GHOST_FUNCTION` + deterministic stripping
+- **C/C++ unit-channel auto-detection**: AST scan for `compile_unit_driver/run_driver` calls; undeclared unit coverage is caught and enters the pending ledger (parity with Go's `_go_unit_tests`)
+- **Unit-ratio quota**: unit share of newly-hit functions above `max_unit_ratio` (default 15%) → `UNIT_RATIO_EXCEEDED` + forced e2e-first hint next round; unit evidence must cite `file:line`; functions provably reachable from entrypoints (CodeGraph) are rejected outright
+- **Deterministic flaky re-check**: on failure the suite re-runs once and per-case status is diffed; `flaky_cases` lands in execution.json as factual evidence
+- **Pre-flight checks**: missing binary / syntactically broken test files → instant BLOCKED, no wasted pytest round
+- **Bug cross-validation**: every `report_bug` is checked (cited file exists; referenced case actually failed); insufficient evidence is downgraded out of the final report. MR loops can enable `bug_base_compare` to re-run failing cases against base_ref in an isolated git worktree (pass@base + fail@head = regression introduced by this change)
+- **Report enhancements**: requirement traceability matrix (requirement → function → coverage status → referencing cases), coverage-source composition (E2E vs unit share), claim-mismatch/flaky/skip-rate disclosure
 
 For **Go** the same E2E-first discipline applies: gen must prefer integration tests that exercise the real HTTP/net path (`httptest`/`gin` server), and pure unit tests (direct method calls, in-memory/mocked deps) need confirmation. `aicoverage/go_test_scope.py` statically classifies each `*_test.go` function as `e2e` (HTTP/net signals) or `unit` (no network signal); the loop auto-detects pure-unit tests even if gen forgot to declare them, and they enter the confirmation gate automatically.
 
@@ -272,6 +287,8 @@ AIcoverage/
 │   ├── kb.py             # code knowledge-base construction (wiki, wikirize methodology)
 │   ├── badcase.py        # badcase self-regression sink (LLM proposes, code adjudicates)
 │   ├── docstyle.py       # test doc-header deterministic gate (description + test point)
+│   ├── assertquality.py  # tautological/weak-assertion deterministic gate (EC-08/EC-10)
+│   ├── bugcheck.py       # report_bug cross-validation + base-version regression comparison
 │   ├── finalreport.py    # final Markdown report (delta/execution/cases/uncovered-reasons/artifact index)
 │   ├── htmlreport.py     # HTML coverage report (source line-by-line coloring)
 │   ├── state.py          # loop_state.json

@@ -18,7 +18,8 @@
 
 生成前先判断该缺陷属于哪类，在用例文件与 manifest 里声明：
 
-- `e2e`：能通过被测二进制的正常入口（CLI 参数/请求输入等黑盒方式）触发——生成端到端用例
+- `e2e`：能通过被测二进制的正常入口（CLI 参数/请求输入等黑盒方式）触发——生成端到端复现用例（**默认优先**）
+- `unit_confirm`：确实无法通过黑盒入口构造触发条件，只能用单测通道（`compile_unit_driver` 直接调函数）复现——生成单测复现用例并写明 reason；该覆盖同样进入人工确认门禁，**不许滥用**（先穷尽 e2e 触发构造）
 - `unobservable`：本质无法运行期观测（如"该 UB 在当前编译器/架构下无副作用"、触发需要内核态资源限制且效果不可见）——**不生成用例**，在 manifest 里写清静态论证理由，由裁决环节归类
 - 无法构造触发条件（与 scan-agent 给的 trigger_condition 对不上）：如实标注，不硬造
 
@@ -27,6 +28,8 @@
 1. 断言预期值必须来自源码真实逻辑（Read 目标函数），禁止臆测
 2. 复现用例的"触发条件"必须对齐 issue 的 `trigger_condition`——用例要在 prompt 的 issue 描述里明确引用 issue_id
 3. 用例崩溃（被测程序 segfault）也算 FAIL 证据，但 harness 必须能捕获非零退出码而不是让 pytest 自身崩掉（用 `run_binary()`，它返回 ProcResult 而不抛异常）
+4. **每个 test_* 函数的 docstring 必须含 `issue_id: ISSUE-XX` 字段**（确定性门禁 EC-10 校验，
+   缺失判 fail）——保证裁决时能把执行结果精确归因到对应 issue，杜绝张冠李戴
 
 ## 输入（prompt 会给出）
 
@@ -46,9 +49,10 @@
   "modified_files": [],
   "dispositions": [
     {"issue_id": "ISSUE-01", "disposition": "e2e", "test_function": "test_issue01_realloc_failure_leak"},
-    {"issue_id": "ISSUE-02", "disposition": "unobservable", "reason": "静态论证：该分支仅影响日志内容，无行为差异"}
+    {"issue_id": "ISSUE-02", "disposition": "unit_confirm", "test_function": "test_issue02_xxx", "reason": "触发条件依赖内部状态，黑盒入口无法构造"},
+    {"issue_id": "ISSUE-03", "disposition": "unobservable", "reason": "静态论证：该分支仅影响日志内容，无行为差异"}
   ],
-  "summary": "3 条缺陷：2 条生成复现用例，1 条 unobservable 静态论证"
+  "summary": "3 条缺陷：1 条 e2e 复现，1 条单测复现（待人工确认），1 条 unobservable 静态论证"
 }
 ```
 

@@ -28,9 +28,12 @@
 - 是否连接外网/依赖外部服务（应使用 harness `local_server()`）→ **EC-03**
 - 是否有无界等待/缺 timeout → **EC-04**
 
-### V4 断言质量
-- 断言预期值是否来自源码真实行为（读被测函数源码抽查 2~3 处关键断言）→ 与源码矛盾 → **EC-05**
+### V4 断言质量（按 manifest.assertion_evidence 全量核对，不再抽查）
+- manifest 的 `assertion_evidence` 是否逐用例给出关键断言的源码依据（`file:line`）→ 缺失 → **EC-05**
+- 逐条核对：Read 断言依据处的源码，确认预期值与源码逻辑一致 → 与源码矛盾 → **EC-05**
 - 无断言或恒真断言（`assert True` / `assert res is not None` 单独成断言）→ **EC-05**
+- （恒真/弱断言的格式级检测已由确定性门禁 EC-08 自动覆盖，你专注语义层：预期值是否真实、
+  断言是否有区分度）
 
 ### V5 manifest 一致性
 - manifest.json 声明的 test_files 与磁盘实际文件一致；new_functions 与文件内 `test_` 函数一致 → 不一致 → **EC-06**
