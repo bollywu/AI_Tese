@@ -83,7 +83,13 @@ def _classify_body(lines: list[str], start: int, end: int) -> str:
 
 
 def classify_go_test_file(path: Path, source_root: Path) -> list[GoTestFunc]:
-    """Classify every TestXxx function in one *_test.go file as e2e or unit."""
+    """Classify every TestXxx function in one *_test.go file as e2e or unit.
+
+    A test is E2E if (a) its own body carries an E2E signal, or (b) the file carries a
+    file-level E2E signal (e.g. a shared `doJSON`/`httptest` helper used across tests) —
+    E2E tests typically exercise the app through a shared HTTP helper rather than
+    repeating httptest calls inline.
+    """
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -93,6 +99,9 @@ def classify_go_test_file(path: Path, source_root: Path) -> list[GoTestFunc]:
         rel = path.relative_to(source_root).as_posix()
     except ValueError:
         rel = path.as_posix()
+    # File-level E2E signal: any httptest/http/net symbol anywhere in the file (including
+    # helpers). Used as a fallback for tests that drive HTTP via a shared helper.
+    file_has_e2e = bool(E2E_SIGNAL_RE.search(text))
     funcs: list[GoTestFunc] = []
     i = 0
     n = len(lines)
@@ -108,10 +117,12 @@ def classify_go_test_file(path: Path, source_root: Path) -> list[GoTestFunc]:
                 i += 1
                 continue
             start_line, end_line = span
+            body_src = _classify_body(lines, start_line, end_line)
+            source = "e2e" if (body_src == "e2e" or file_has_e2e) else "unit"
             funcs.append(GoTestFunc(
                 file=rel, name=m.group("name"),
                 start_line=start_line + 1, end_line=end_line + 1,
-                source=_classify_body(lines, start_line, end_line),
+                source=source,
             ))
             i = end_line + 1
             continue

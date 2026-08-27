@@ -242,6 +242,46 @@ class TestGoTestScope:
         funcs = classify_go_test_file(f, root)
         assert funcs[0].source == "unit"
 
+    def test_file_level_helper_fallback(self, tmp_path):
+        """A test driving HTTP via a shared helper (doJSON) with no inline httptest must
+        still be e2e because the file carries an httptest helper signal."""
+        from aicoverage.go_test_scope import classify_go_test_file
+        root = tmp_path
+        f = _write_go_test(root, "api_test.go",
+                           "package api\n"
+                           "import \"net/http/httptest\"\n"
+                           "func doJSON(r any, p string) *httptest.ResponseRecorder {\n"
+                           "\treq := httptest.NewRequest(\"GET\", p, nil)\n"
+                           "\tw := httptest.NewRecorder()\n"
+                           "\treturn w\n"
+                           "}\n"
+                           "func TestList(t *testing.T) {\n"
+                           "\tw := doJSON(nil, \"/api/v1/vessels\")\n"
+                           "\t_ = w\n"
+                           "}\n")
+        funcs = classify_go_test_file(f, root)
+        assert funcs[0].name == "TestList"
+        assert funcs[0].source == "e2e"  # file-level httptest helper signal
+
+    def test_mixed_file_marks_all_e2e_when_httptest_present(self, tmp_path):
+        """A file with an httptest helper classifies all its tests as e2e (heuristic for
+        shared-HTTP-helper test files)."""
+        from aicoverage.go_test_scope import classify_go_test_file
+        root = tmp_path
+        f = _write_go_test(root, "mix_test.go",
+                           "package m\n"
+                           "import \"net/http/httptest\"\n"
+                           "func TestPure(t *testing.T) {\n"
+                           "\tDoWork()\n"
+                           "}\n"
+                           "func TestHTTP(t *testing.T) {\n"
+                           "\thttptest.NewRecorder()\n"
+                           "}\n")
+        funcs = classify_go_test_file(f, root)
+        by = {x.name: x.source for x in funcs}
+        assert by["TestHTTP"] == "e2e"
+        assert by["TestPure"] == "e2e"  # file-level fallback
+
 
 class TestGoE2EFirstGate:
     def test_go_unittest_hint(self, tmp_path):
