@@ -2,7 +2,7 @@
 
 > **🌐 Language / 语言切换**: [English](README.md) · [中文（简体）](README_zh.md)
 
-An automated **test-coverage closure loop for C/C++ and Go projects**: **requirement parsing → test generation → local execution → coverage analysis → iterative gap-filling**, until function/line coverage meets the threshold or early-stop triggers. C/C++ uses gcov (`--coverage`); Go uses the native `go test -coverprofile` backend.
+An automated **test-coverage closure loop for C/C++, Go, Rust and Java projects**: **requirement parsing → test generation → local execution → coverage analysis → iterative gap-filling**, until function/line coverage meets the threshold or early-stop triggers. C/C++ uses gcov (`--coverage`); Go uses the native `go test -coverprofile` backend; Rust uses `cargo llvm-cov`/tarpaulin (lcov); Java uses JaCoCo (jacoco.xml) -- non-C/C++ languages are natively instrumented at test time with no `--coverage` build.
 
 > **Acknowledgements**: The call-graph analysis, incremental scanning, knowledge-base construction, and Agent orchestration of this project benefit respectively from [codegraph](https://github.com/colbymchenry/codegraph) (colbymchenry), [open-code-review](https://github.com/alibaba/open-code-review) (Alibaba), [wikirize](https://github.com/tmih06/wikirize) (tmih06), and the **Tencent CodeBuddy team** ([Agent SDK](https://www.codebuddy.ai)). Full credits are listed in the "Third-party open-source dependencies and acknowledgements" section at the end.
 
@@ -168,7 +168,7 @@ The report follows the classic drill-down form of mainstream coverage tools (ifr
 
 | Section | Field | Description |
 |---------|-------|-------------|
-| `[project]` | name / language | project name; `c`, `cpp`, or `go` |
+| `[project]` | name / language | project name; `c` / `cpp` / `go` / `rust` / `java` |
 | `[source]` | path / include_globs / exclude_globs | source root; file globs to include in statistics (Go defaults to `**/*.go`) |
 | `[build]` | clean_cmd / build_cmd / binary | build command (**must contain `--coverage` instrumentation**; `.gcno` generation is verified after build); artifact path — **not required for Go** |
 | `[go]` | go_bin / packages / build_tags / coverprofile | Go backend: `go` executable; test packages (default `./...`); extra `-tags`; coverprofile output path |
@@ -271,6 +271,9 @@ AIcoverage/
 │   ├── build.py          # instrumented build + .gcno verification
 │   ├── gcov.py           # gcov -i -b JSON parsing → CoverageReport (C/C++)
 │   ├── go_cover.py       # `go test -coverprofile` parsing → CoverageReport (Go)
+│   ├── rust_cover.py     # lcov parsing → CoverageReport (Rust: cargo llvm-cov/tarpaulin)
+│   ├── java_cover.py     # jacoco.xml parsing → CoverageReport (Java: JaCoCo agent)
+│   ├── history.py        # cross-run coverage history (history.jsonl, `aicov history`)
 │   ├── executor.py       # deterministic test execution + junit/execution.json (pytest & go test)
 │   ├── source.py         # C/C++/Go function list (ctags-first/regex fallback)
 │   ├── runner.py         # AgentRunner (SDK, lazy import)

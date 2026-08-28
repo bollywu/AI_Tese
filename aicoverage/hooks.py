@@ -208,19 +208,33 @@ def make_security_hooks(agent_name: str, cfg: ProjectConfig):
         if agent_name == "gen-agent":
             try:
                 p = Path(file_path).expanduser().resolve()
+                lang = getattr(cfg, "language", "c")
                 # Go tests live next to the source packages by convention
                 # (internal/router/router_test.go), NOT under a separate tests/ dir.
                 # Without this branch the rule below would block every Go case the
                 # moment the SDK starts delivering Write hooks (silent bomb).
-                if getattr(cfg, "language", "c") == "go" and p.name.endswith("_test.go"):
+                if lang == "go" and p.name.endswith("_test.go"):
+                    return {}
+                # Rust: integration tests in tests/*.rs; unit tests embed in the
+                # module file (#[cfg(test)] mod tests) -- only NEW files under src/
+                # may be created (never overwrite existing source).
+                if lang == "rust" and p.suffix == ".rs":
+                    if "tests" in p.parts:
+                        return {}
+                    if str(p).startswith(str(cfg.source_path)) and not p.exists():
+                        return {}
+                # Java: test classes under the conventional test source roots
+                if lang == "java" and p.suffix == ".java" and (
+                        "src/test" in p.as_posix() or "Test" in p.name):
                     return {}
                 if str(p).startswith(str(cfg.source_path)) and cfg.test_dir in p.parents:
                     return {}
                 if str(p).startswith(str(cfg.source_path)):
+                    lang_note = {"go": "（Go 项目为 *_test.go 与源码同目录）",
+                                 "rust": "（Rust 项目为 tests/ 集成测试或 src/ 下新增 #[cfg(test)] 模块）",
+                                 "java": "（Java 项目为 src/test/java/** 测试类）"}.get(lang, "")
                     return {"decision": "block",
-                            "reason": (f"gen-agent 只能写测试目录 {cfg.test_dir}"
-                                       + ("（Go 项目为 *_test.go 与源码同目录）"
-                                          if getattr(cfg, "language", "c") == "go" else "") +
+                            "reason": (f"gen-agent 只能写测试目录 {cfg.test_dir}{lang_note}"
                                        "，不得修改被测源码。")}
             except (OSError, RuntimeError):
                 pass

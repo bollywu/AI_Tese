@@ -155,6 +155,7 @@ def _parse_junit_cases(junit_path: Path) -> dict[str, str]:
 
 # soft-dependency probe cache: {interpreter: pytest_timeout available?}
 _TIMEOUT_PROBE: dict[str, bool] = {}
+_XDIST_PROBE: dict[str, bool] = {}
 
 
 def _has_pytest_timeout(py: str) -> bool:
@@ -167,6 +168,18 @@ def _has_pytest_timeout(py: str) -> bool:
         except (subprocess.TimeoutExpired, OSError):
             _TIMEOUT_PROBE[py] = False
     return _TIMEOUT_PROBE[py]
+
+
+def _has_xdist(py: str) -> bool:
+    """Whether the interpreter has pytest-xdist installed (probed once per py)."""
+    if py not in _XDIST_PROBE:
+        try:
+            proc = subprocess.run([py, "-c", "import xdist"],
+                                  capture_output=True, timeout=30)
+            _XDIST_PROBE[py] = proc.returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            _XDIST_PROBE[py] = False
+    return _XDIST_PROBE[py]
 
 
 def _preflight_check(cfg: ProjectConfig, test_files: list[Path] | None) -> str | None:
@@ -248,13 +261,20 @@ def run_tests(
     Dispatches by language:
       - C/C++: pytest subprocess + junit.xml + gcov collection
       - Go:    `go test -coverprofile=...` + coverprofile collection
+      - Rust:  `cargo llvm-cov --lcov` / `cargo tarpaulin` + lcov collection
+      - Java:  `mvn test` / `gradle test jacocoTestReport` + jacoco.xml collection
 
     Args:
         test_files: run only the given test files (targeted verification after gen); None = full test_dir.
         collect_coverage: whether to run coverage collection after execution.
     """
-    if getattr(cfg, "language", "c") == "go":
+    lang = getattr(cfg, "language", "c")
+    if lang == "go":
         return run_go_tests(cfg, iter_dir, timeout=timeout, collect_coverage=collect_coverage)
+    if lang == "rust":
+        return run_rust_tests(cfg, iter_dir, timeout=timeout, collect_coverage=collect_coverage)
+    if lang == "java":
+        return run_java_tests(cfg, iter_dir, timeout=timeout, collect_coverage=collect_coverage)
     return _run_c_tests(cfg, iter_dir, test_files=test_files, timeout=timeout,
                         collect_coverage=collect_coverage, python=python)
 
@@ -423,6 +443,252 @@ def _go_env_blocked(log: str) -> bool:
     return False
 
 
+def run_rust_tests(
+    cfg: ProjectConfig,
+    iter_dir: Path,
+    *,
+    timeout: int | None = None,
+    collect_coverage: bool = True,
+) -> ExecutionResult:
+    """Run Rust tests with native coverage instrumentation, then collect lcov.
+
+    Producer selected by [rust].cov_tool:
+      - llvm-cov (preferred): `cargo llvm-cov test --lcov --output-path <lcov>`
+      - tarpaulin:            `cargo tarpaulin --out Lcov --output-dir <dir>`
+    Both write an lcov report parsed by rust_cover.collect_rust.
+    Artifacts mirror the Go contract: execution.json, cargo.log, coverage.json.
+    """
+    result = ExecutionResult(verdict="BLOCKED")
+    iter_dir.mkdir(parents=True, exist_ok=True)
+    log_path = iter_dir / "cargo.log"
+    coverage_path = iter_dir / "coverage.json"
+
+    timeout = timeout or cfg.test_timeout
+    assert timeout > 0, "test.timeout 必须为正数"
+
+    cargo = getattr(cfg, "cargo_bin", "cargo") or "cargo"
+    tool = getattr(cfg, "rust_cov_tool", "llvm-cov") or "llvm-cov"
+    if shutil.which(cargo) is None:
+        result.verdict = "BLOCKED"
+        result.failure_kind = "env_blocked"
+        result.detail = f"cargo 不存在（PATH 中未找到 {cargo!r}）"
+        (iter_dir / "execution.json").write_text(
+            __import__("json").dumps(result.to_dict(), indent=2, ensure_ascii=False),
+            encoding="utf-8")
+        return result
+
+    lcov = cfg.lcov
+    lcov.parent.mkdir(parents=True, exist_ok=True)
+    if lcov.exists():
+        lcov.unlink()
+    if tool == "llvm-cov":
+        cmd = [cargo, "llvm-cov", "test", "--lcov", "--output-path", str(lcov)]
+        lcov_actual = lcov
+    else:  # tarpaulin writes <output-dir>/lcov.info
+        out_dir = lcov.parent
+        cmd = [cargo, "tarpaulin", "--out", "Lcov", "--output-dir", str(out_dir)]
+        lcov_actual = out_dir / "lcov.info"
+
+    import time
+    start = time.time()
+    try:
+        proc = subprocess.run(
+            cmd, cwd=str(cfg.source_path), capture_output=True, text=True,
+            timeout=timeout, env=_build_env(cfg),
+        )
+        log = (proc.stdout or "") + ("\n[stderr]\n" + proc.stderr if proc.stderr else "")
+        rc = proc.returncode
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        log = f"TIMEOUT after {timeout}s\n{out}"
+        rc = 124
+    result.duration_s = time.time() - start
+    log_path.write_text(log, encoding="utf-8")
+    result.log_path = log_path
+
+    passed, failed = _parse_cargo_test_output(log)
+    result.tests = passed + failed
+    result.failures = failed
+
+    if collect_coverage and lcov_actual.exists():
+        from .rust_cover import collect_rust
+        report = collect_rust(cfg.source_path, lcov_actual,
+                              include_filter=cfg.include_globs,
+                              exclude_filter=cfg.exclude_globs)
+        report.save(coverage_path)
+        result.coverage_path = coverage_path
+
+    if rc == 124:
+        result.verdict = "BLOCKED"
+        result.failure_kind = "timeout_blocked"
+        result.detail = f"cargo test 超过 {timeout}s 被强制终止"
+    elif rc == 0:
+        result.verdict = "PASS"
+    elif _rust_env_blocked(log):
+        result.verdict = "BLOCKED"
+        result.failure_kind = "env_blocked"
+        result.detail = "cargo 未正常执行（编译/环境错误）"
+    else:
+        result.verdict = "FAIL"
+        result.failure_kind = "case_fail"
+
+    (iter_dir / "execution.json").write_text(
+        __import__("json").dumps(result.to_dict(), indent=2, ensure_ascii=False),
+        encoding="utf-8")
+    return result
+
+
+def _parse_cargo_test_output(log: str) -> tuple[int, int]:
+    """Aggregate (passed, failed) across all `test result: ...` summary lines
+    (one per test target; --lib / bins / integration tests each print one)."""
+    import re
+    passed = failed = 0
+    for m in re.finditer(r"test result:\s*\w+\.\s*(\d+)\s*passed;\s*(\d+)\s*failed", log):
+        passed += int(m.group(1))
+        failed += int(m.group(2))
+    return passed, failed
+
+
+def _rust_env_blocked(log: str) -> bool:
+    import re
+    markers = [r"error\[E\d+\]", r"error: could not compile", r"no such command",
+               r"failed to resolve", r"is not installed"]
+    return any(re.search(mk, log) for mk in markers)
+
+
+def run_java_tests(
+    cfg: ProjectConfig,
+    iter_dir: Path,
+    *,
+    timeout: int | None = None,
+    collect_coverage: bool = True,
+) -> ExecutionResult:
+    """Run Java tests with JaCoCo agent instrumentation, then collect jacoco.xml.
+
+    Build tool by [java].build_tool: maven (`mvn test jacoco:report`) /
+    gradle (`gradle test jacocoTestReport`) / auto (pom.xml -> maven, else
+    build.gradle[.kts] -> gradle). JaCoCo must be configured in the build file
+    (the javaagent is attached by the build plugin, not by AIcoverage).
+    Artifacts mirror the Go contract: execution.json, <tool>.log, coverage.json.
+    """
+    result = ExecutionResult(verdict="BLOCKED")
+    iter_dir.mkdir(parents=True, exist_ok=True)
+    coverage_path = iter_dir / "coverage.json"
+
+    timeout = timeout or cfg.test_timeout
+    assert timeout > 0, "test.timeout 必须为正数"
+
+    tool = getattr(cfg, "java_build_tool", "auto") or "auto"
+    if tool == "auto":
+        if (cfg.source_path / "pom.xml").exists():
+            tool = "maven"
+        elif ((cfg.source_path / "build.gradle").exists()
+              or (cfg.source_path / "build.gradle.kts").exists()):
+            tool = "gradle"
+        else:
+            result.verdict = "BLOCKED"
+            result.failure_kind = "env_blocked"
+            result.detail = "未找到 pom.xml / build.gradle[.kts]，无法判定构建工具"
+            (iter_dir / "execution.json").write_text(
+                __import__("json").dumps(result.to_dict(), indent=2, ensure_ascii=False),
+                encoding="utf-8")
+            return result
+
+    if tool == "maven":
+        binary = getattr(cfg, "mvn_bin", "mvn") or "mvn"
+        cmd = [binary, "test", "jacoco:report"]
+        log_name = "mvn.log"
+    else:
+        binary = getattr(cfg, "gradle_bin", "gradle") or "gradle"
+        cmd = [binary, "test", "jacocoTestReport"]
+        log_name = "gradle.log"
+
+    if shutil.which(binary) is None:
+        result.verdict = "BLOCKED"
+        result.failure_kind = "env_blocked"
+        result.detail = f"{tool} 不存在（PATH 中未找到 {binary!r}）"
+        (iter_dir / "execution.json").write_text(
+            __import__("json").dumps(result.to_dict(), indent=2, ensure_ascii=False),
+            encoding="utf-8")
+        return result
+
+    log_path = iter_dir / log_name
+    import time
+    start = time.time()
+    try:
+        proc = subprocess.run(
+            cmd, cwd=str(cfg.source_path), capture_output=True, text=True,
+            timeout=timeout, env=_build_env(cfg),
+        )
+        log = (proc.stdout or "") + ("\n[stderr]\n" + proc.stderr if proc.stderr else "")
+        rc = proc.returncode
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        log = f"TIMEOUT after {timeout}s\n{out}"
+        rc = 124
+    result.duration_s = time.time() - start
+    log_path.write_text(log, encoding="utf-8")
+    result.log_path = log_path
+
+    passed, failed = _parse_java_test_output(log)
+    result.tests = passed + failed
+    result.failures = failed
+
+    jacoco = cfg.jacoco
+    if collect_coverage and jacoco.exists():
+        from .java_cover import collect_java
+        report = collect_java(cfg.source_path, jacoco,
+                              include_filter=cfg.include_globs,
+                              exclude_filter=cfg.exclude_globs)
+        report.save(coverage_path)
+        result.coverage_path = coverage_path
+
+    if rc == 124:
+        result.verdict = "BLOCKED"
+        result.failure_kind = "timeout_blocked"
+        result.detail = f"{tool} 超过 {timeout}s 被强制终止"
+    elif rc == 0:
+        result.verdict = "PASS"
+    elif _java_env_blocked(log):
+        result.verdict = "BLOCKED"
+        result.failure_kind = "env_blocked"
+        result.detail = f"{tool} 未正常执行（编译/环境错误）"
+    else:
+        result.verdict = "FAIL"
+        result.failure_kind = "case_fail"
+
+    (iter_dir / "execution.json").write_text(
+        __import__("json").dumps(result.to_dict(), indent=2, ensure_ascii=False),
+        encoding="utf-8")
+    return result
+
+
+def _parse_java_test_output(log: str) -> tuple[int, int]:
+    """Aggregate (passed, failed) from surefire summary lines.
+
+    Surefire prints per-class lines ("Tests run: 5, Failures: 1, Errors: 0,
+    Skipped: 0") and a final summary line. Take the LAST "Tests run" line that
+    carries Failures/Errors (the summary), avoiding double-counting per-class lines.
+    Gradle's output is not parsed (no stable summary format); rc decides there.
+    """
+    import re
+    matches = list(re.finditer(
+        r"Tests run:\s*(\d+),\s*Failures:\s*(\d+),\s*Errors:\s*(\d+)", log))
+    if not matches:
+        return 0, 0
+    m = matches[-1]
+    total = int(m.group(1))
+    failed = int(m.group(2)) + int(m.group(3))
+    return total - failed, failed
+
+
+def _java_env_blocked(log: str) -> bool:
+    import re
+    markers = [r"COMPILATION ERROR", r"Could not resolve dependencies",
+               r"BUILD FAILURE.*pom", r"Plugin .* not found", r"JAVA_HOME"]
+    return any(re.search(mk, log) for mk in markers)
+
+
 def _run_c_tests(
     cfg: ProjectConfig,
     iter_dir: Path,
@@ -476,6 +742,12 @@ def _run_c_tests(
     # (a suite-level rc=124 marks the ENTIRE round BLOCKED, losing everything).
     if _has_pytest_timeout(py):
         cmd += ["--timeout", str(timeout)]
+    # Parallel execution via pytest-xdist (soft dependency, [test] workers):
+    # 0=off; >0 = -n <N>; -1 = -n auto. Safe with gcov (.gcda merges are atomic
+    # at process exit) and with harness local_server/free_port (random ports).
+    workers = getattr(cfg, "workers", 0)
+    if workers != 0 and _has_xdist(py):
+        cmd += ["-n", "auto" if workers < 0 else str(workers)]
 
     import time
     start = time.time()

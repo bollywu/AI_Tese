@@ -122,8 +122,9 @@ def run_mutation_check(cfg: ProjectConfig, *, run_id: str | None = None,
     and always restored. Writes mutate_report.json into the resolved iter dir.
     """
     result = MutationResult(ok=False)
-    if getattr(cfg, "language", "c") == "go":
-        result.detail = ("Go 项目无被测二进制概念（go test 直接跑真实代码），"
+    from .config import NON_BUILD_LANGUAGES
+    if getattr(cfg, "language", "c") in NON_BUILD_LANGUAGES:
+        result.detail = (f"{cfg.language} 项目无被测二进制概念（测试时原生插桩），"
                          "变异自检不适用")
         return result
     binary = cfg.binary_path

@@ -25,11 +25,38 @@ DEFAULT_CONFIG_NAME = "aicoverage.toml"
 
 DEFAULT_INCLUDE_GLOBS = ["src/**/*.c", "src/**/*.cc", "src/**/*.cpp", "src/**/*.cxx"]
 DEFAULT_GO_INCLUDE_GLOBS = ["**/*.go"]
+DEFAULT_RUST_INCLUDE_GLOBS = ["**/*.rs"]
+DEFAULT_JAVA_INCLUDE_GLOBS = ["**/*.java"]
 DEFAULT_EXCLUDE_GLOBS = ["deps/**", "third_party/**", "tests/**"]
 
 # Source-file suffix sets per language (used by source_files() and others)
 _C_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hpp"}
 _GO_SUFFIXES = {".go"}
+_RUST_SUFFIXES = {".rs"}
+_JAVA_SUFFIXES = {".java"}
+
+#: Languages whose coverage is natively instrumented at test time (no
+#: --coverage build step / no artifact binary): Go (go test -coverprofile),
+#: Rust (cargo llvm-cov / tarpaulin -> lcov), Java (JaCoCo agent -> jacoco.xml).
+NON_BUILD_LANGUAGES = ("go", "rust", "java")
+
+
+def default_include_globs(language: str) -> list[str]:
+    """Per-language default source globs."""
+    return {
+        "go": list(DEFAULT_GO_INCLUDE_GLOBS),
+        "rust": list(DEFAULT_RUST_INCLUDE_GLOBS),
+        "java": list(DEFAULT_JAVA_INCLUDE_GLOBS),
+    }.get(language, list(DEFAULT_INCLUDE_GLOBS))
+
+
+def suffixes_for(language: str) -> set[str]:
+    """Per-language source suffix set."""
+    return {
+        "go": set(_GO_SUFFIXES),
+        "rust": set(_RUST_SUFFIXES),
+        "java": set(_JAVA_SUFFIXES),
+    }.get(language, set(_C_SUFFIXES))
 
 
 class ConfigError(SystemExit):
@@ -85,6 +112,12 @@ class ProjectConfig:
     flaky_rerun: bool = True                 # on case failure, re-run once and diff per-case
                                              # status -> deterministic flaky evidence
                                              # (execution.json: flaky_cases)
+    workers: int = 0                         # pytest-xdist parallel workers: 0=off (default),
+                                             # >0 = `-n <N>`, -1 = `-n auto`. Requires the
+                                             # pytest-xdist package (probed, soft dependency).
+                                             # Safe with gcov: .gcda updates are merged by the
+                                             # runtime; harness local_server/free_port use
+                                             # OS-assigned random ports (no collisions).
 
     # ── Coverage (gcov) ───────────────────────────────────────
     gcov_bin: str = "gcov"
@@ -106,6 +139,23 @@ class ProjectConfig:
     go_packages: list[str] = field(default_factory=lambda: ["./..."])
     go_build_tags: str = ""
     coverprofile_path: str = ".aicoverage/cover.out"
+
+    # ── Rust coverage backend (language == "rust") ──
+    # cargo llvm-cov (preferred) / cargo tarpaulin produce an lcov report; no
+    # --coverage build step exists. cov_tool selects the producer; lcov_path is
+    # where the executor writes the lcov output (relative to source_path).
+    cargo_bin: str = "cargo"
+    rust_cov_tool: str = "llvm-cov"          # llvm-cov | tarpaulin
+    lcov_path: str = ".aicoverage/lcov.info"
+
+    # ── Java coverage backend (language == "java") ──
+    # JaCoCo agent instruments at test time (maven/gradle); jacoco_xml is the
+    # report path (relative to source_path). build_tool picks the build system.
+    java_build_tool: str = "auto"            # auto | maven | gradle
+    mvn_bin: str = "mvn"
+    gradle_bin: str = "gradle"
+    jacoco_xml: str = "target/site/jacoco/jacoco.xml"   # maven default;
+    # gradle: build/reports/jacoco/test/jacocoTestReport.xml
 
     # ── Loop ──────────────────────────────────────────────────
     max_iter: int = 6
@@ -183,7 +233,7 @@ class ProjectConfig:
         to dataclass defaults so every field is present.
         """
         src = Path(source_path).expanduser().resolve()
-        include_globs = list(DEFAULT_GO_INCLUDE_GLOBS) if language == "go" else list(DEFAULT_INCLUDE_GLOBS)
+        include_globs = default_include_globs(language)
         return cls(
             config_path=src / "aicoverage.toml",
             name=name or src.name,
@@ -245,6 +295,18 @@ class ProjectConfig:
         return p if p.is_absolute() else self.source_path / p
 
     @property
+    def lcov(self) -> Path:
+        """Rust lcov output path (absolute; only used when language == 'rust')."""
+        p = Path(self.lcov_path)
+        return p if p.is_absolute() else self.source_path / p
+
+    @property
+    def jacoco(self) -> Path:
+        """Java jacoco.xml report path (absolute; only used when language == 'java')."""
+        p = Path(self.jacoco_xml)
+        return p if p.is_absolute() else self.source_path / p
+
+    @property
     def effective_gen_model(self) -> str:
         return self.gen_model or self.model
 
@@ -253,9 +315,10 @@ class ProjectConfig:
         errors: list[str] = []
         if not self.source_path.is_dir():
             errors.append(f"source.path 不存在或不是目录: {self.source_path}")
-        # Go is instrumented natively via `go test -coverprofile`; the --coverage
-        # build/binary contract only applies to C/C++ projects.
-        if self.language != "go":
+        # Go (go test -coverprofile), Rust (cargo llvm-cov -> lcov) and Java
+        # (JaCoCo agent -> jacoco.xml) instrument natively at test time; the
+        # --coverage build/binary contract only applies to C/C++ projects.
+        if self.language not in NON_BUILD_LANGUAGES:
             if not self.build_cmd.strip():
                 errors.append("build.build_cmd 为空——必须提供插桩构建命令（含 --coverage）")
             if self.binary is None:
@@ -276,7 +339,7 @@ class ProjectConfig:
             return list(self._source_files_cache)
         results: list[Path] = []
         if self.source_path.is_dir():
-            suffixes = _GO_SUFFIXES if self.language == "go" else _C_SUFFIXES
+            suffixes = suffixes_for(self.language)
             all_files = [
                 p for p in self.source_path.rglob("*")
                 if p.is_file() and p.suffix in suffixes
@@ -318,6 +381,12 @@ class ProjectConfig:
         env["AICOV_GO_PACKAGES"] = " ".join(getattr(self, "go_packages", ["./..."]))
         env["AICOV_GO_BUILD_TAGS"] = getattr(self, "go_build_tags", "")
         env["AICOV_GO_COVERPROFILE"] = str(getattr(self, "coverprofile", self.source_path / ".aicoverage" / "cover.out"))
+        # Rust / Java backend env (same getattr fallback)
+        env["AICOV_CARGO_BIN"] = getattr(self, "cargo_bin", "cargo")
+        env["AICOV_RUST_COV_TOOL"] = getattr(self, "rust_cov_tool", "llvm-cov")
+        env["AICOV_LCOV"] = str(getattr(self, "lcov", self.source_path / ".aicoverage" / "lcov.info"))
+        env["AICOV_JAVA_BUILD_TOOL"] = getattr(self, "java_build_tool", "auto")
+        env["AICOV_JACOCO_XML"] = str(getattr(self, "jacoco", self.source_path / "target/site/jacoco/jacoco.xml"))
         if run_dir is not None:
             env["AICOV_RUN_DIR"] = str(run_dir)
         if iter_dir is not None:
@@ -356,6 +425,8 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
     scan = raw.get("scan", {})
     unit = raw.get("unittest", {})
     gosec = raw.get("go", {})
+    rustsec = raw.get("rust", {})
+    javasec = raw.get("java", {})
 
     source_path = Path(src.get("path", ".")).expanduser()
     if not source_path.is_absolute():
@@ -365,9 +436,9 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
     binary = Path(binary_raw).expanduser() if binary_raw else None
 
     language = str(proj.get("language", "c")).lower()
-    if language not in ("c", "cpp", "go"):
-        raise ConfigError(f"❌ project.language 必须是 c / cpp / go，当前: {language!r}")
-    default_includes = DEFAULT_GO_INCLUDE_GLOBS if language == "go" else DEFAULT_INCLUDE_GLOBS
+    if language not in ("c", "cpp", "go", "rust", "java"):
+        raise ConfigError(f"❌ project.language 必须是 c / cpp / go / rust / java，当前: {language!r}")
+    default_includes = default_include_globs(language)
 
     cfg = ProjectConfig(
         config_path=path,
@@ -386,6 +457,7 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
         test_python=str(test.get("python", "auto")).strip(),
         test_timeout=int(test.get("timeout", 600)),
         flaky_rerun=bool(test.get("flaky_rerun", True)),
+        workers=int(test.get("workers", 0)),
         gcov_bin=str(cov.get("gcov_bin", "gcov")).strip(),
         func_target=float(cov.get("func_target", 100.0)),
         cond_target=float(cov.get("cond_target", 85.0)),
@@ -418,9 +490,21 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
         go_packages=[str(x) for x in gosec.get("packages", ["./..."])] or ["./..."],
         go_build_tags=str(gosec.get("build_tags", "")).strip(),
         coverprofile_path=str(gosec.get("coverprofile", ".aicoverage/cover.out")).strip() or ".aicoverage/cover.out",
+        cargo_bin=str(rustsec.get("cargo_bin", "cargo")).strip() or "cargo",
+        rust_cov_tool=str(rustsec.get("cov_tool", "llvm-cov")).strip() or "llvm-cov",
+        lcov_path=str(rustsec.get("lcov", ".aicoverage/lcov.info")).strip() or ".aicoverage/lcov.info",
+        java_build_tool=str(javasec.get("build_tool", "auto")).strip() or "auto",
+        mvn_bin=str(javasec.get("mvn_bin", "mvn")).strip() or "mvn",
+        gradle_bin=str(javasec.get("gradle_bin", "gradle")).strip() or "gradle",
+        jacoco_xml=str(javasec.get("jacoco_xml", "target/site/jacoco/jacoco.xml")).strip()
+            or "target/site/jacoco/jacoco.xml",
     )
     if cfg.scan_backend not in ("auto", "ocr", "agent", "off"):
         raise ConfigError(f"❌ scan.backend 必须是 auto/ocr/agent/off，当前: {cfg.scan_backend!r}")
+    if cfg.rust_cov_tool not in ("llvm-cov", "tarpaulin"):
+        raise ConfigError(f"❌ rust.cov_tool 必须是 llvm-cov / tarpaulin，当前: {cfg.rust_cov_tool!r}")
+    if cfg.java_build_tool not in ("auto", "maven", "gradle"):
+        raise ConfigError(f"❌ java.build_tool 必须是 auto / maven / gradle，当前: {cfg.java_build_tool!r}")
 
     errors = cfg.validate()
     if errors:

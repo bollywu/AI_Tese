@@ -122,8 +122,9 @@ def compare_base_head(cfg: ProjectConfig, test_files: list[Path],
     """
     if not shutil.which("git"):
         return None
-    if getattr(cfg, "language", "c") == "go":
-        return None  # Go base compare needs module-specific handling; not supported yet
+    from .config import NON_BUILD_LANGUAGES
+    if getattr(cfg, "language", "c") in NON_BUILD_LANGUAGES:
+        return None  # non-build languages have no instrumented binary to swap; not supported
     work_dir = work_dir or cfg.workspace / "base_compare"
     work_dir.mkdir(parents=True, exist_ok=True)
     worktree = work_dir / "wt"

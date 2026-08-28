@@ -148,6 +148,122 @@ entrypoints = ["main"]
 backend = "auto"
 """
 
+# Rust project config: no --coverage build / binary needed. `cargo llvm-cov`
+# (preferred) or `cargo tarpaulin` instruments at test time and emits lcov,
+# so the [build] section is omitted and the [rust] section drives the backend.
+CONFIG_TEMPLATE_RUST = """\
+# AIcoverage project config -- Rust coverage via `cargo llvm-cov` / tarpaulin
+# docs: https://github.com/yourorg/AIcoverage (example)
+[project]
+name = "{name}"
+display_name = "{name}"
+language = "rust"
+description = ""
+
+[source]
+path = "."
+include_globs = ["**/*.rs"]
+exclude_globs = ["target/**", "vendor/**", "tests/**"]
+
+[rust]
+cargo_bin = "cargo"
+cov_tool = "llvm-cov"          # llvm-cov | tarpaulin
+lcov = ".aicoverage/lcov.info"
+
+[test]
+dir = "tests"          # cargo integration-test dir
+timeout = 600
+
+[coverage]
+func_target = 100.0
+cond_target = 85.0
+
+[loop]
+max_iter = 6
+no_progress_stop = 2
+
+[llm]
+model = "your-model-name"  # required: model name supported by the Agent SDK
+gen_model = ""         # empty = same as model
+max_turns = 120
+max_verify_retry = 3
+
+[knowledge]            # all optional
+kb_dir = ""
+badcase_dir = ""
+few_shots_dir = ""
+prompts_dir = ""
+
+[guard]
+blocked_commands = []
+
+[codegraph]
+enabled = false
+index_dir = ".codegraph"
+entrypoints = ["main"]
+
+[scan]
+backend = "auto"
+"""
+
+# Java project config: JaCoCo agent instruments at test time (maven/gradle);
+# jacoco.xml is the report. No --coverage build step exists.
+CONFIG_TEMPLATE_JAVA = """\
+# AIcoverage project config -- Java coverage via JaCoCo (jacoco.xml)
+# docs: https://github.com/yourorg/AIcoverage (example)
+[project]
+name = "{name}"
+display_name = "{name}"
+language = "java"
+description = ""
+
+[source]
+path = "."
+include_globs = ["**/*.java"]
+exclude_globs = ["target/**", "build/**", "**/test/**"]
+
+[java]
+build_tool = "auto"          # auto | maven | gradle
+mvn_bin = "mvn"
+gradle_bin = "gradle"
+jacoco_xml = "target/site/jacoco/jacoco.xml"   # maven 默认；gradle: build/reports/jacoco/test/jacocoTestReport.xml
+
+[test]
+dir = "tests"          # 未用（Java 测试在 src/test/java），占位
+timeout = 900
+
+[coverage]
+func_target = 100.0
+cond_target = 85.0
+
+[loop]
+max_iter = 6
+no_progress_stop = 2
+
+[llm]
+model = "your-model-name"  # required: model name supported by the Agent SDK
+gen_model = ""         # empty = same as model
+max_turns = 120
+max_verify_retry = 3
+
+[knowledge]            # all optional
+kb_dir = ""
+badcase_dir = ""
+few_shots_dir = ""
+prompts_dir = ""
+
+[guard]
+blocked_commands = []
+
+[codegraph]
+enabled = false
+index_dir = ".codegraph"
+entrypoints = ["main"]
+
+[scan]
+backend = "auto"
+"""
+
 CONFTEST_TEMPLATE = '''\
 """AIcoverage test scaffolding conftest (extendable per project)."""
 import os
@@ -547,16 +663,23 @@ def scaffold(source: Path, *, name: str, build_cmd: str, binary: str,
     """Generate the config + tests/ harness scaffold in the target project."""
     if language == "go":
         config = CONFIG_TEMPLATE_GO.format(name=name)
+    elif language == "rust":
+        config = CONFIG_TEMPLATE_RUST.format(name=name)
+    elif language == "java":
+        config = CONFIG_TEMPLATE_JAVA.format(name=name)
     else:
         config = CONFIG_TEMPLATE.format(name=name, language=language,
                                         build_cmd=build_cmd, binary=binary)
     (source / "aicoverage.toml").write_text(config, encoding="utf-8")
 
-    tests = source / "tests"
-    (tests / "lib").mkdir(parents=True, exist_ok=True)
-    (tests / "conftest.py").write_text(CONFTEST_TEMPLATE, encoding="utf-8")
-    (tests / "lib" / "harness.py").write_text(HARNESS_TEMPLATE, encoding="utf-8")
-    (tests / "lib" / "__init__.py").write_text("", encoding="utf-8")
+    # pytest harness scaffold is C/C++-only: Go/Rust/Java tests are written in
+    # the project's own framework (go test / cargo test / JUnit), no harness.py
+    if language in ("c", "cpp"):
+        tests = source / "tests"
+        (tests / "lib").mkdir(parents=True, exist_ok=True)
+        (tests / "conftest.py").write_text(CONFTEST_TEMPLATE, encoding="utf-8")
+        (tests / "lib" / "harness.py").write_text(HARNESS_TEMPLATE, encoding="utf-8")
+        (tests / "lib" / "__init__.py").write_text("", encoding="utf-8")
 
     # .aicoverage workspace + gitignore
     (source / ".aicoverage").mkdir(exist_ok=True)

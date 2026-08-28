@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .config import ProjectConfig, load_config
+from .config import NON_BUILD_LANGUAGES, ProjectConfig, load_config
 
 
 def main() -> int:
@@ -38,7 +38,7 @@ def main() -> int:
     p_init.add_argument("--build-cmd", default=None, help="插桩构建命令（须含 --coverage；Go 项目可省略）")
     p_init.add_argument("--binary", default=None, help="构建产物路径（相对源码根；Go 项目可省略）")
     p_init.add_argument("--name", default=None, help="项目名（默认取目录名）")
-    p_init.add_argument("--language", default="c", choices=["c", "cpp", "go"])
+    p_init.add_argument("--language", default="c", choices=["c", "cpp", "go", "rust", "java"])
 
     p_build = sub.add_parser("build", help="插桩构建 + .gcno 校验")
     p_build.add_argument("--skip-clean", action="store_true")
@@ -101,6 +101,8 @@ def main() -> int:
     p_mutate.add_argument("--run-id", default=None, help="run_id（默认最近一次 LOOP_/MR_ run）")
     p_mutate.add_argument("--iter", type=int, default=None, help="轮次（默认该 run 最新一轮）")
 
+    sub.add_parser("history", help="跨 run 覆盖率演进历史（.aicoverage/history.jsonl）")
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -130,7 +132,20 @@ def main() -> int:
         return _cmd_report(cfg, args)
     if args.command == "mutate":
         return _cmd_mutate(cfg, args)
+    if args.command == "history":
+        return _cmd_history(cfg)
     return 1
+
+
+# ── history（跨 run 覆盖历史）─────────────────────────────────────────
+
+def _cmd_history(cfg: ProjectConfig) -> int:
+    from .history import load_history, render_history
+
+    entries = load_history(cfg.workspace)
+    print(f"▶ 覆盖率演进历史（{cfg.workspace / 'history.jsonl'}，{len(entries)} 次 run）\n")
+    print(render_history(entries))
+    return 0
 
 
 # ── mutate（P3 变异自检）─────────────────────────────────────────────
@@ -178,8 +193,10 @@ def _cmd_init(args) -> int:
 # ── build / coverage ────────────────────────────────────────────────
 
 def _cmd_build(cfg: ProjectConfig, args) -> int:
-    if cfg.language == "go":
-        print("✅ Go 项目无需插桩构建——go test -coverprofile 原生采集覆盖率")
+    if cfg.language in NON_BUILD_LANGUAGES:
+        tool = {"go": "go test -coverprofile", "rust": "cargo llvm-cov / tarpaulin",
+                "java": "JaCoCo agent"}[cfg.language]
+        print(f"✅ {cfg.language} 项目无需插桩构建——{tool} 原生采集覆盖率")
         return 0
     from .build import build as do_build
 
@@ -202,10 +219,10 @@ def _cmd_coverage(cfg: ProjectConfig, args) -> int:
         print(f"test: verdict={exec_result.verdict} tests={exec_result.tests} "
               f"fail={exec_result.failures} ({exec_result.duration_s:.1f}s)")
         cov_path = exec_result.coverage_path
-    elif cfg.language == "go":
-        # Go coverage only exists after running `go test -coverprofile`; there is no
-        # static collection path (unlike gcov's .gcno inventory baseline).
-        print("⚠️ Go 项目必须先跑测试才能采集覆盖率，请加 --run-tests")
+    elif cfg.language in NON_BUILD_LANGUAGES:
+        # Non-build languages have no static collection path (unlike gcov's .gcno
+        # inventory baseline): coverage only exists after running the test suite.
+        print(f"⚠️ {cfg.language} 项目必须先跑测试才能采集覆盖率，请加 --run-tests")
         return 1
     else:
         clean_gcda(cfg.source_path)

@@ -29,9 +29,9 @@ from . import state as st
 from .agent_call import call_agent, reset_backoff
 from .assertquality import check_assert_quality
 from .build import build as do_build
-from .config import ProjectConfig
+from .config import NON_BUILD_LANGUAGES, ProjectConfig
 from .docstyle import check_test_docstrings
-from .executor import run_go_tests, run_tests
+from .executor import run_tests
 from .gcov import CoverageReport, collect as gcov_collect
 from .runner import AgentRunner
 
@@ -87,11 +87,16 @@ def _unittest_hint(cfg: ProjectConfig) -> str:
         requests); unit = test that instantiates the object and calls methods directly
         (in-memory/mocked deps). All Go tests are *_test.go; the classifier in
         go_test_scope distinguishes source. Pure unit tests must be declared.
+      - Rust/Java: same E2E-first discipline (integration tests driving the real
+        app path preferred); no static source classifier yet -> declaration-based
+        (manifest.unit_confirm_required) governance only.
     """
     if not cfg.e2e_first:
         return ""  # e2e-first 纪律关闭，不注入单测约束（保持旧行为）
     if getattr(cfg, "language", "c") == "go":
         return _go_e2e_first_hint(cfg)
+    if cfg.language in ("rust", "java"):
+        return _nonc_e2e_first_hint(cfg)
     cc = cfg.ut_compiler or "（跟随 build 体系，建议 gcc/g++）"
     return f"""
 ## 覆盖来源铁律：E2E 优先，单测需人工确认（最高优先级，违反必返工）
@@ -145,6 +150,25 @@ def _go_e2e_first_hint(cfg: ProjectConfig) -> str:
 """
 
 
+def _nonc_e2e_first_hint(cfg: ProjectConfig) -> str:
+    """Rust/Java E2E-first hint (no static test-source classifier yet --
+    declaration-based governance: pure unit tests must be declared)."""
+    framework = "cargo test 的 #[test] 函数" if cfg.language == "rust" else "JUnit 测试方法"
+    return f"""
+## 覆盖来源铁律（{cfg.language}）：E2E/集成测试优先，纯单测需人工确认（最高优先级，违反必返工）
+
+**默认必须写集成/E2E 测试覆盖目标函数**：驱动应用的真实入口（启动真实服务/调用公共 API
+走完整链路）。纯单测（直接实例化对象、注入 mock/内存依赖）**只允许**用于 gap 根因明确为
+**N1/N3/N5** 且确认无法通过集成测试触达的函数。
+
+**单测覆盖必须人工确认**：每一个纯单测覆盖的目标函数，都必须写进 manifest 的
+`unit_confirm_required` 字段（数组，每项 {{"file","function","evidence"}}），
+`evidence` 说明为什么集成/e2e 不可达（引用源码证据 file:line）。未列入该字段的纯单测视为无效。
+
+测试写法：用项目自身的 {framework}，按项目既有测试目录约定放置。
+"""
+
+
 def _gen_write_instruction(cfg: ProjectConfig) -> str:
     """Language-aware instruction for where/how gen-agent writes test cases."""
     if getattr(cfg, "language", "c") == "go":
@@ -158,7 +182,22 @@ def _gen_write_instruction(cfg: ProjectConfig) -> str:
             f"放在被测源码包旁边（如 src/foo/foo_test.go），用 go test 的标准测试函数"
             f"(func TestXxx(t *testing.T))。不要用 pytest/harness。{go_e2e_note}"
         )
-    if cfg.e2e_first and cfg.language != "go":
+    if cfg.language == "rust":
+        note = ("【覆盖来源】优先写集成测试（驱动真实入口）；纯单测务必在 "
+                "manifest.unit_confirm_required 声明并写明证据。" if cfg.e2e_first else "")
+        return (
+            f"生成/修复 Rust 测试：集成测试放 tests/ 目录（每个 .rs 是一个集成测试 crate），"
+            f"单元测试与模块同文件（#[cfg(test)] mod tests）。用 cargo test 的标准 #[test] 函数。"
+            f"不要用 pytest/harness。{note}"
+        )
+    if cfg.language == "java":
+        note = ("【覆盖来源】优先写集成测试（驱动真实入口）；纯单测务必在 "
+                "manifest.unit_confirm_required 声明并写明证据。" if cfg.e2e_first else "")
+        return (
+            f"生成/修复 Java 测试类：按项目既有测试目录约定（Maven: src/test/java/**，"
+            f"Gradle 同），用 JUnit 的标准 @Test 方法。不要用 pytest/harness。{note}"
+        )
+    if cfg.e2e_first and cfg.language not in NON_BUILD_LANGUAGES:
         return (
             f"生成/修复 pytest 用例到 {cfg.test_dir}/（文件名 test_<主题>_<序号>.py）。"
             f"【覆盖来源】默认走 e2e（run_binary 黑盒触发）；若某函数必须用单测"
@@ -192,7 +231,7 @@ def _prompt_gen(cfg: ProjectConfig, run_id: str, iter_n: int, iter_dir: Path,
     return f"""生成第 {iter_n} 轮测试用例（run_id={run_id}）。
 
 被测项目：{cfg.display_name}（{cfg.language}），源码根 $AICOV_SRC = {cfg.source_path}
-{'被测二进制：$AICOV_BINARY = ' + str(cfg.binary_path) if cfg.language != 'go' and cfg.binary_path else '（Go 项目：无需插桩二进制，由 go test -coverprofile 原生采集）'}
+{'被测二进制：$AICOV_BINARY = ' + str(cfg.binary_path) if cfg.language not in NON_BUILD_LANGUAGES and cfg.binary_path else f'（{cfg.language} 项目：测试时原生插桩，无需 --coverage 构建/二进制）'}
 测试目录：$AICOV_TEST_DIR = {cfg.test_dir}
 harness 原子函数库：{cfg.tests_lib_dir / "harness.py"}（先 Read 它！）
 {wiki_navigation_hint(cfg)}{badcase_hint(cfg)}
@@ -229,7 +268,8 @@ def _snapshot_manifest_files(cfg: ProjectConfig, manifest: dict) -> dict[str, st
     """
     import hashlib
     snap: dict[str, str] = {}
-    base = cfg.source_path if cfg.language == "go" else cfg.test_dir
+    # non-build languages colocate tests with sources (Go *_test.go / Rust tests/)
+    base = cfg.source_path if cfg.language in NON_BUILD_LANGUAGES else cfg.test_dir
     for f in manifest.get("test_files", []):
         p = Path(f)
         if not p.is_absolute():
@@ -279,7 +319,9 @@ def _confirm_unit_coverage(cfg: ProjectConfig, manifest: dict,
     declared = manifest.get("unit_confirm_required") or []
     is_go = getattr(cfg, "language", "c") == "go"
     auto_unit = _go_unit_tests(cfg, manifest) if (is_go and cfg.e2e_first) else []
-    if not is_go and cfg.e2e_first:
+    # Rust/Java have no static test-source classifier yet: declaration-based
+    # governance only (auto-detection stays empty).
+    if cfg.language in ("c", "cpp") and cfg.e2e_first:
         auto_unit = _undeclared_unit_channel(cfg, manifest)
         if auto_unit:
             print(f"      ⚠️ AST 检测到 {len(auto_unit)} 个未声明的单测通道用例"
@@ -559,13 +601,18 @@ def _go_unit_tests(cfg: ProjectConfig, manifest: dict) -> list[dict]:
 def _prompt_verify(cfg: ProjectConfig, run_id: str, iter_n: int, iter_dir: Path,
                    manifest: dict) -> str:
     files = manifest.get("test_files", [])
-    is_go = getattr(cfg, "language", "c") == "go"
+    lang = getattr(cfg, "language", "c")
     lang_note = (
         "审查对象是 Go *_test.go 测试函数（func TestXxx(t *testing.T)）。"
         "【E2E-first】检查用例是否优先走 e2e/集成（httptest/gin 起 server 走真实链路）；"
         "对 manifest.unit_confirm_required 或纯单测（无 HTTP/网络信号）覆盖的函数，"
         "确认其确属 e2e 不可达（N1/N3/N5）且证据充分，否则提出修复。"
-        if is_go else
+        if lang == "go" else
+        f"审查对象是 {lang} 测试（项目自身框架：Rust cargo test / Java JUnit）。"
+        "【E2E-first】检查用例是否优先驱动真实入口的集成测试；"
+        "对 manifest.unit_confirm_required 声明的纯单测函数，"
+        "确认其确属 e2e 不可达（N1/N3/N5）且证据充分，否则提出修复。"
+        if lang in ("rust", "java") else
         "测试目录：$AICOV_TEST_DIR = 测试目录见环境变量\nharness：见环境变量 AICOV_TEST_DIR 下 lib/harness.py"
     )
     return f"""静态审查本轮生成的用例（run_id={run_id} iter={iter_n}）。
@@ -578,9 +625,11 @@ manifest 声明的文件：{json.dumps(files, ensure_ascii=False)}
 
 def _prompt_quality(run_id: str, iter_n: int, iter_dir: Path,
                     execution: dict, known_badcases: str = "",
-                    *, is_go: bool = False, extra_note: str = "") -> str:
-    log_ref = (iter_dir / "gotest.log") if is_go else (iter_dir / "pytest.log")
-    junit_ref = "" if is_go else f"junit：{iter_dir / 'junit.xml'}\n"
+                    *, language: str = "c", extra_note: str = "") -> str:
+    log_name = {"go": "gotest.log", "rust": "cargo.log",
+                "java": "mvn.log"}.get(language)
+    log_ref = (iter_dir / log_name) if log_name else (iter_dir / "pytest.log")
+    junit_ref = "" if log_name else f"junit：{iter_dir / 'junit.xml'}\n"
     return f"""分析本轮执行失败（run_id={run_id} iter={iter_n}）。
 
 执行结果：{json.dumps(execution, ensure_ascii=False, indent=1)}
@@ -729,11 +778,13 @@ async def run_loop(
                  data={"success": res.success, "plan": bool(plan)})
 
     # ── [1] Instrumented build ──────────────────────────────────
-    # Go is instrumented natively by `go test -coverprofile`; no --coverage build
-    # step (or binary) exists, so the build stage is skipped entirely.
+    # Go (go test -coverprofile), Rust (cargo llvm-cov) and Java (JaCoCo agent)
+    # instrument natively at test time; no --coverage build step (or binary)
+    # exists, so the build stage is skipped entirely.
     is_go = getattr(cfg, "language", "c") == "go"
-    if is_go:
-        print("▶ [1] 插桩构建（跳过——Go 由 go test -coverprofile 原生插桩）")
+    non_build = cfg.language in NON_BUILD_LANGUAGES
+    if non_build:
+        print(f"▶ [1] 插桩构建（跳过——{cfg.language} 测试时原生插桩）")
     elif skip_build:
         print("▶ [1] 插桩构建（跳过——调用方保证二进制已是最新插桩版本）")
     else:
@@ -760,6 +811,22 @@ async def run_loop(
             p for p in cfg.source_path.rglob("*_test.go")
             if p.is_file()
         ]
+    elif cfg.language == "rust":
+        # Rust: integration tests in tests/*.rs + unit tests in src (#[test])
+        existing_tests = (
+            [p for p in cfg.source_path.rglob("*.rs")
+             if p.is_file() and ("#[test]" in p.read_text(encoding="utf-8", errors="replace")
+                                 or p.parent.name == "tests")]
+        )
+    elif cfg.language == "java":
+        # Java: test classes under the conventional test source roots
+        existing_tests = [
+            p for p in cfg.source_path.rglob("*Test.java")
+            if p.is_file()
+        ] + [
+            p for p in cfg.source_path.rglob("*Tests.java")
+            if p.is_file()
+        ]
     else:
         existing_tests = list(cfg.test_dir.glob("test_*.py")) if cfg.test_dir.exists() else []
     print(f"▶ [2] 基线覆盖率（已有用例 {len(existing_tests)} 个）")
@@ -769,12 +836,13 @@ async def run_loop(
     else:
         exec0 = None
         baseline_cov_path = run_dir / "baseline_coverage.json"
-        if cfg.language == "go":
-            # Go has no gcov; run `go test -coverprofile` once to get the empty baseline.
-            go_res = run_go_tests(cfg, baseline_dir)
+        if non_build:
+            # Non-build languages have no gcov; run tests once to get the (possibly
+            # empty) baseline via the language backend.
+            nb_res = run_tests(cfg, baseline_dir)
             baseline_cov_path = baseline_dir / "coverage.json"
-            if not go_res.coverage_path:
-                print("  ⚠️ go test 未产出 coverprofile，基线的函数清单为空")
+            if not nb_res.coverage_path:
+                print(f"  ⚠️ {cfg.language} 测试未产出覆盖报告，基线的函数清单为空")
         else:
             baseline_cov = gcov_collect(
                 cfg.source_path, cfg.gcov_bin,
@@ -959,12 +1027,13 @@ async def run_loop(
             # Deterministic zero-LLM gates (merged into verify_report.json):
             #   - docstyle EC-07: docstring 描述/测试点 header fields
             #   - assertquality EC-08: tautological/weak/missing assertions
-            # (both are pytest-specific; Go *_test.go has neither docstrings nor
-            #  harness atomic functions, so both are skipped for Go projects)
-            doc_problems = ([] if cfg.language == "go"
-                            else check_test_docstrings(cfg.test_dir, manifest.get("test_files", [])))
-            aq_problems = ([] if cfg.language == "go"
-                           else check_assert_quality(cfg.test_dir, manifest.get("test_files", [])))
+            # (both are pytest-specific; Go/Rust/Java tests have neither pytest
+            #  docstrings nor harness atomic functions, so both are skipped there)
+            pytest_lang = cfg.language in ("c", "cpp")
+            doc_problems = (check_test_docstrings(cfg.test_dir, manifest.get("test_files", []))
+                            if pytest_lang else [])
+            aq_problems = (check_assert_quality(cfg.test_dir, manifest.get("test_files", []))
+                           if pytest_lang else [])
             gate_problems = doc_problems + aq_problems
             if gate_problems:
                 report["problems"] = list(report.get("problems", [])) + gate_problems
@@ -1062,7 +1131,7 @@ async def run_loop(
             await _call("quality-agent",
                         _prompt_quality(run_id, iter_n, iter_dir, execution.to_dict(),
                                         known_badcases=badcase_hint(cfg),
-                                        is_go=(cfg.language == "go"),
+                                        language=cfg.language,
                                         extra_note=skip_note + flaky_note),
                         iter_dir, iter_n, "quality", retries=1)
             quality = _read_json(iter_dir / "quality_report.json")
@@ -1257,6 +1326,11 @@ def _finalize(cfg: ProjectConfig, runs_dir: Path, run_id: str) -> dict:
     report_path = runs_dir / run_id / "loop_final_report.md"
     _write_final_report(cfg, runs_dir, run_id, final_state, report_path,
                         html_index=html_index)
+
+    # Cross-run coverage history (append-only, best-effort): answers "how has the
+    # project's coverage evolved over time" (`aicov history`).
+    _append_run_history(cfg, run_id, final_state)
+
     obs.emit("loop.exit", run_id, runs_dir=runs_dir,
              data={"status": final_state.get("status"),
                    "exit_reason": final_state.get("exit_reason"),
@@ -1270,6 +1344,32 @@ def _finalize(cfg: ProjectConfig, runs_dir: Path, run_id: str) -> dict:
     if html_index:
         final_state["html_report"] = str(html_index)
     return final_state
+
+
+def _append_run_history(cfg: ProjectConfig, run_id: str, final_state: dict) -> None:
+    """Append one history entry at loop end.
+
+    Metrics merge final_metrics (set_exit) with the last iteration's
+    coverage_after (which carries hit/total counters).
+    """
+    from .history import append_history
+    fm = final_state.get("final_metrics") or {}
+    iters = final_state.get("iterations") or []
+    last_cov = ((iters[-1].get("coverage_after") if iters else None) or {})
+    trigger = final_state.get("trigger")
+    append_history(cfg.workspace, {
+        "run_id": run_id,
+        "trigger": trigger.get("type", "manual") if isinstance(trigger, dict) else "manual",
+        "status": final_state.get("status", "unknown"),
+        "exit_reason": final_state.get("exit_reason", ""),
+        "func_pct": fm.get("func_pct", last_cov.get("func_pct", 0.0)),
+        "cond_pct": fm.get("cond_pct", last_cov.get("cond_pct", 0.0)),
+        "line_pct": last_cov.get("line_pct", 0.0),
+        "func_hit": last_cov.get("func_hit", 0),
+        "func_total": last_cov.get("func_total", 0),
+        "branch_hit": last_cov.get("branch_hit", 0),
+        "branch_total": last_cov.get("branch_total", 0),
+    })
 
 
 def _generate_html_report(cfg: ProjectConfig, runs_dir: Path, run_id: str) -> Path | None:

@@ -2,7 +2,7 @@
 
 > **🌐 语言切换 / Language**：[中文（简体）](README_zh.md) · [English](README.md)
 
-面向 **C/C++ 与 Go 项目**的自动化测试覆盖率闭环：**需求解析 → 测试生成 → 本地执行 → 覆盖率分析 → 迭代补测**，直到函数/行覆盖率达标或触发早停。C/C++ 用 gcov（`--coverage`），Go 用原生 `go test -coverprofile` 后端。
+面向 **C/C++、Go、Rust、Java 项目**的自动化测试覆盖率闭环：**需求解析 → 测试生成 → 本地执行 → 覆盖率分析 → 迭代补测**，直到函数/行覆盖率达标或触发早停。C/C++ 用 gcov（`--coverage`），Go 用原生 `go test -coverprofile`，Rust 用 `cargo llvm-cov`/tarpaulin（lcov），Java 用 JaCoCo（jacoco.xml）——非 C/C++ 语言均为测试时原生插桩，无需 `--coverage` 构建。
 
 > **Acknowledgements / 致谢**：本项目的调用链分析、增量扫描、知识库构建与 Agent 编排，分别得益于 [codegraph](https://github.com/colbymchenry/codegraph)（colbymchenry）、[open-code-review](https://github.com/alibaba/open-code-review)（Alibaba）、[wikirize](https://github.com/tmih06/wikirize)（tmih06）与**腾讯 CodeBuddy 团队**（[Agent SDK](https://www.codebuddy.ai)）的开源贡献。完整清单见文末「[第三方开源依赖与致谢](#第三方开源依赖与致谢)」。
 
@@ -100,6 +100,24 @@ aicov coverage --run-tests
 aicov loop --yes
 ```
 
+### Rust / Java 项目
+
+同为测试时原生插桩（跳过构建阶段）：
+
+```bash
+# Rust（cargo llvm-cov 优先，tarpaulin 备选；产物 lcov）
+aicov init --source /path/to/your-crate --language rust
+# [rust] cov_tool="llvm-cov" | "tarpaulin"，lcov 输出路径可配
+aicov coverage --run-tests && aicov loop --yes
+
+# Java（JaCoCo agent；产物 jacoco.xml，需在 pom.xml/build.gradle 配好 JaCoCo 插件）
+aicov init --source /path/to/your-java-app --language java
+# [java] build_tool="auto|maven|gradle"，jacoco_xml 路径按构建工具默认值可覆盖
+aicov coverage --run-tests && aicov loop --yes
+```
+
+用例约定：Rust 写 `tests/*.rs` 集成测试或 `src/` 内 `#[cfg(test)]` 模块；Java 写 `src/test/java/**` JUnit 测试类。E2E-first 治理同样适用（纯单测需 `manifest.unit_confirm_required` 声明并经人工确认）。
+
 ## 最终报告内容
 
 `runs/<run_id>/loop_final_report.md` 由 `finalreport.py` 汇总全部磁盘产物生成（只排版、不推断），包含六个章节：
@@ -159,16 +177,25 @@ aicov html --from-json path/to/coverage.json --out ./report
 
 > 实现说明：条件/决策覆盖由 gcov 分支数据映射（至少命中一次的分支方向占比）；色条用纯 CSS 实现（报告可纯文本 diff、无二进制资源）。
 
+## 跨 run 覆盖历史
+
+每次 `loop` 结束自动追加一条到 `.aicoverage/history.jsonl`（append-only JSONL，崩溃最多丢一行）。查看演进趋势：
+
+```bash
+aicov history    # 趋势表 + 相对首次 run 的函数/分支覆盖演进摘要
+```
 
 ## 配置参考（aicoverage.toml）
 
 | 段 | 字段 | 说明 |
 |----|------|------|
-| `[project]` | name / language | 项目名；`c`、`cpp` 或 `go` |
-| `[source]` | path / include_globs / exclude_globs | 源码根；参与统计的文件 glob（Go 默认 `**/*.go`） |
-| `[build]` | clean_cmd / build_cmd / binary | 构建命令（**必须含 `--coverage` 插桩**，构建后会校验 `.gcno` 生成）；产物路径 — **Go 项目不需要** |
+| `[project]` | name / language | 项目名；`c` / `cpp` / `go` / `rust` / `java` |
+| `[source]` | path / include_globs / exclude_globs | 源码根；参与统计的文件 glob（Go 默认 `**/*.go`，Rust 默认 `**/*.rs`，Java 默认 `**/*.java`） |
+| `[build]` | clean_cmd / build_cmd / binary / timeout | 构建命令（**必须含 `--coverage` 插桩**，构建后会校验 `.gcno` 生成并对缺 gcno 的源文件告警）；产物路径；构建超时 — **Go/Rust/Java 项目不需要** |
 | `[go]` | go_bin / packages / build_tags / coverprofile | Go 后端：`go` 可执行文件；测试包（默认 `./...`）；额外 `-tags`；coverprofile 输出路径 |
-| `[test]` | dir / python / timeout / flaky_rerun | pytest 目录（C/C++）；解释器（auto=探测）；整体超时（>0）；失败时确定性重跑一次做 flaky 复检 |
+| `[rust]` | cargo_bin / cov_tool / lcov | Rust 后端：`cargo` 可执行文件；覆盖生产者（`llvm-cov` 默认 / `tarpaulin`）；lcov 输出路径 |
+| `[java]` | build_tool / mvn_bin / gradle_bin / jacoco_xml | Java 后端：`auto`（探测 pom.xml/build.gradle）/ `maven` / `gradle`；jacoco.xml 报告路径 |
+| `[test]` | dir / python / timeout / flaky_rerun / workers | pytest 目录（C/C++）；解释器（auto=探测）；整体超时（>0）；失败时确定性重跑一次做 flaky 复检；pytest-xdist 并行数（0=关，-1=auto，需装 pytest-xdist） |
 | `[coverage]` | gcov_bin / func_target / cond_target / e2e_first / require_unit_confirm / unit_confirm_auto_yes / max_unit_ratio / bug_base_compare | gcov 可执行文件（仅 C/C++）；达标线；E2E 优先治理与单测人工确认；单测覆盖占比配额；MR 失败用例 base 版本对照（opt-in） |
 | `[loop]` | max_iter / no_progress_stop | 最大迭代；连续无增长轮数（早停） |
 | `[llm]` | model / gen_model / max_turns / max_verify_retry | 模型配置；max_turns=单次 agent 最大工具轮次（复杂项目建议 ≥120）；max_verify_retry=verify 失败修复回环次数（复杂项目建议 3） |
@@ -267,6 +294,9 @@ AIcoverage/
 │   ├── build.py          # 插桩构建 + .gcno 校验
 │   ├── gcov.py           # gcov -i -b JSON 解析 → CoverageReport（C/C++）
 │   ├── go_cover.py       # `go test -coverprofile` 解析 → CoverageReport（Go）
+│   ├── rust_cover.py     # lcov 解析 → CoverageReport（Rust：cargo llvm-cov/tarpaulin）
+│   ├── java_cover.py     # jacoco.xml 解析 → CoverageReport（Java：JaCoCo agent）
+│   ├── history.py        # 跨 run 覆盖历史（history.jsonl，aicov history）
 │   ├── executor.py       # 确定性测试执行 + junit/execution.json（pytest 与 go test）
 │   ├── source.py         # C/C++/Go 函数清单（ctags 优先/正则兜底）
 │   ├── runner.py         # AgentRunner（SDK，惰性导入）
