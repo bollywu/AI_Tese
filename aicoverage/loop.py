@@ -180,7 +180,14 @@ def _prompt_gen(cfg: ProjectConfig, run_id: str, iter_n: int, iter_dir: Path,
     if quality_actions:
         fix_part = ("## 上一轮失败修复（优先处理）\n"
                     + json.dumps(quality_actions, ensure_ascii=False, indent=1) + "\n")
-    plan_part = f"## 测试计划（analyzer 产物摘要）\n{plan_summary}\n" if plan_summary else ""
+    plan_part = ""
+    if plan_summary:
+        plan_part = (
+            f"## 测试计划（analyzer 产物摘要）\n{plan_summary}\n"
+            "若 target 带 `reachability` 字段（CodeGraph 可达性富化）："
+            "`found=true` 且 `path` 非空 → 该函数有从入口的真实调用链，按 path 设计 e2e 触发；"
+            "`found=false`（resolved 但无路径）→ 疑似死代码，可直接论证单测通道。\n"
+        )
     ctx_part = f"## MR 增量上下文（本次闭环只针对这些变更函数）\n{target_context}\n" if target_context else ""
     return f"""生成第 {iter_n} 轮测试用例（run_id={run_id}）。
 
@@ -416,6 +423,51 @@ def _verify_manifest_claims(manifest: dict, report: CoverageReport) -> list[str]
         if fn is None or fn.execution_count == 0:
             mismatch.append(f"{f}::{name}")
     return sorted(set(mismatch))
+
+
+def _enrich_plan_reachability(cfg: ProjectConfig, plan: dict) -> int:
+    """Attach CodeGraph reachability to each plan target (deterministic, plan 4.3).
+
+    For every target function, a reverse BFS to the configured entrypoints yields
+    `reachability[fn] = {"found", "resolved", "path"}`:
+      - found=True + path "main → a → f" tells gen exactly which entry/input path
+        drives the function (design e2e triggers from a real call chain, not a guess);
+      - found=False (resolved, no path) strongly suggests dead code -- gen can
+        justify the unit channel up front instead of failing E2E attempts first.
+    No-op when CodeGraph is disabled or unindexed. Returns functions enriched.
+    """
+    if not getattr(cfg, "codegraph_enabled", False):
+        return 0
+    try:
+        from . import callgraph
+        if not callgraph.is_indexed(cfg.source_path, cfg.codegraph_index_dir):
+            return 0
+        names = sorted({str(fn) for t in plan.get("targets") or []
+                        for fn in (t.get("functions") or []) if fn})
+        if not names:
+            return 0
+        results = callgraph.trace_batch_to_entrypoints(
+            cfg.source_path, names, cfg.codegraph_entrypoints,
+            index_dir=cfg.codegraph_index_dir)
+    except Exception:  # noqa: BLE001 — 可达性富化失败不阻断计划（fail-soft）
+        return 0
+    enriched = 0
+    for t in plan.get("targets") or []:
+        reach: dict[str, dict] = {}
+        for fn in t.get("functions") or []:
+            fn = str(fn)
+            tr = results.get(fn)
+            if tr is None:
+                continue
+            reach[fn] = {
+                "found": tr.found,
+                "resolved": tr.resolved,
+                "path": tr.paths[0].render() if tr.paths else "",
+            }
+            enriched += 1
+        if reach:
+            t["reachability"] = reach
+    return enriched
 
 
 def _plan_ghost_functions(cfg: ProjectConfig, plan: dict) -> list[dict]:
@@ -662,6 +714,13 @@ async def run_loop(
                         kept.append(t)
                 plan["targets"] = kept
                 print(f"  ⚠️ 计划含 {len(ghosts)} 个幽灵函数（源码中不存在），已剔除")
+            # Reachability enrichment (plan 4.3): CodeGraph reverse BFS per target
+            # function -> reachability{found,path} so gen designs e2e triggers from
+            # real call chains; unreachable functions can justify unit channel early.
+            enriched = _enrich_plan_reachability(cfg, plan)
+            if enriched:
+                print(f"  🔗 可达性富化：{enriched} 个目标函数已附入口调用链（CodeGraph）")
+                st.update_state(runs_dir, run_id, {"plan_reachability_enriched": enriched})
             plan_summary = json.dumps(plan["targets"][:30], ensure_ascii=False)
             print(f"  ✅ 分析完成：{len(plan['targets'])} 个测试目标")
         else:

@@ -96,6 +96,11 @@ def main() -> int:
     p_report.add_argument("run_id", nargs="?", default=None)
     p_report.add_argument("--list", action="store_true", help="列出全部 run")
 
+    p_mutate = sub.add_parser("mutate", help="变异自检：把被测二进制替换为失效替身重跑某轮新用例，"
+                                             "仍 PASS 的用例即假阳性嫌疑（仅 C/C++）")
+    p_mutate.add_argument("--run-id", default=None, help="run_id（默认最近一次 LOOP_/MR_ run）")
+    p_mutate.add_argument("--iter", type=int, default=None, help="轮次（默认该 run 最新一轮）")
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -123,7 +128,30 @@ def main() -> int:
         return asyncio.run(_cmd_kb(cfg, args))
     if args.command == "report":
         return _cmd_report(cfg, args)
+    if args.command == "mutate":
+        return _cmd_mutate(cfg, args)
     return 1
+
+
+# ── mutate（P3 变异自检）─────────────────────────────────────────────
+
+def _cmd_mutate(cfg: ProjectConfig, args) -> int:
+    from .mutate import run_mutation_check
+
+    result = run_mutation_check(cfg, run_id=args.run_id, iter_n=args.iter)
+    if not result.ok:
+        print(f"❌ 变异自检未执行：{result.detail}")
+        return 1
+    print(f"▶ 变异自检 {result.run_id}/iter_{result.iter_n}：{result.detail}")
+    if result.suspicious:
+        print(f"\n🔴 假阳性嫌疑用例（对失效二进制仍 PASS，说明未真正验证被测行为）：")
+        for n in result.suspicious:
+            print(f"  - {n}")
+        print(f"\n处置建议：逐条人工复核上述用例的断言是否恒真/无区分度"
+              f"（EC-08 恒真门禁未拦住的高阶变体）。报告：见该轮 iter 目录 mutate_report.json")
+        return 2
+    print("✅ 全部受检用例在变异环境下如预期失败——无假阳性")
+    return 0
 
 
 # ── init ────────────────────────────────────────────────────────────
