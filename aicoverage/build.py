@@ -14,8 +14,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .backends import get_backend
 from .config import ProjectConfig
-from .gcov import find_gcno_files
 
 
 @dataclass
@@ -82,15 +82,25 @@ def build(cfg: ProjectConfig, *, skip_clean: bool = False, log_dir: Path | None 
         _dump_log(log_dir, logs)
         return result
 
-    result.gcno_count = len(find_gcno_files(cfg.source_path))
-    if result.gcno_count == 0:
-        result.failure_reason = (
-            "构建成功但未发现 .gcno 文件——build_cmd 大概率没有带 --coverage 插桩，"
-            "覆盖率将恒为 0%。请在 [build] build_cmd 中加入 -fprofile-arcs -ftest-coverage"
-            "（或 --coverage）并重新构建。"
-        )
-        _dump_log(log_dir, logs)
-        return result
+    backend = get_backend(cfg)
+    if backend.name == "gcov":
+        from .gcov import find_gcno_files
+        result.gcno_count = len(find_gcno_files(cfg.source_path))
+        if result.gcno_count == 0:
+            result.failure_reason = (
+                "构建成功但未发现 .gcno 文件——build_cmd 大概率没有带 --coverage 插桩，"
+                "覆盖率将恒为 0%。请在 [build] build_cmd 中加入 -fprofile-arcs -ftest-coverage"
+                "（或 --coverage）并重新构建。"
+            )
+            _dump_log(log_dir, logs)
+            return result
+    else:
+        # 非 gcov 后端（go/java）：插桩生效校验交给对应 backend
+        verify_errs = backend.verify_build(cfg)
+        if verify_errs:
+            result.failure_reason = "构建产物存在但后端校验未通过：" + "；".join(verify_errs)
+            _dump_log(log_dir, logs)
+            return result
 
     result.ok = True
     _dump_log(log_dir, logs)

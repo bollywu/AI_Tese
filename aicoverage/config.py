@@ -151,7 +151,11 @@ class ProjectConfig:
     ut_obj_dir: str = ".aicoverage/ut"        # unit-test intermediate dir (relative to source_path; .gcno/.gcda here)
 
     # ── Language backend extras (Go / Java, optional; used by aicoverage.backends) ──
-    go_coverdir: str = ".aicoverage/coverdata"   # GOCOVERDIR 基准目录（相对 source_path）
+    go_bin: str = "go"                               # [go].go_bin
+    go_packages: list[str] = field(default_factory=lambda: ["..."])   # [go].packages（go test/coverpkg 的包集合）
+    go_tags: str = ""                                # [go].build_tags
+    go_coverdir: str = ".aicoverage/coverdata"       # [go].coverdir —— GOCOVERDIR 基准目录（相对 source_path）
+    go_coverprofile: str = ".aicoverage/cover.out"   # [go].coverprofile —— coverprofile 落点（外部 go test / covdata textfmt）
     java_agent: str = ""                         # jacocoagent.jar 绝对路径（[java].jacoco_agent）
     java_exec_dir: str = ".aicoverage/jacoco"    # jacoco.exec 落点目录（相对 source_path）
 
@@ -383,7 +387,11 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
         ut_flags=[str(x) for x in unit.get("flags", ["-O0", "-g", "-Wall"])] or ["-O0", "-g", "-Wall"],
         ut_link_libs=[str(x) for x in unit.get("link_libs", [])],
         ut_obj_dir=str(unit.get("obj_dir", ".aicoverage/ut")).strip() or ".aicoverage/ut",
+        go_bin=str(go_cfg.get("go_bin", "go")).strip() or "go",
+        go_packages=[str(x) for x in go_cfg.get("packages", ["..."])] or ["..."],
+        go_tags=str(go_cfg.get("build_tags", "")).strip(),
         go_coverdir=str(go_cfg.get("coverdir", ".aicoverage/coverdata")).strip() or ".aicoverage/coverdata",
+        go_coverprofile=str(go_cfg.get("coverprofile", ".aicoverage/cover.out")).strip() or ".aicoverage/cover.out",
         java_agent=str(java_cfg.get("jacoco_agent", "")).strip(),
         java_exec_dir=str(java_cfg.get("exec_dir", ".aicoverage/jacoco")).strip() or ".aicoverage/jacoco",
     )
