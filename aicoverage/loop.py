@@ -27,11 +27,12 @@ from pathlib import Path
 from . import observability as obs
 from . import state as st
 from .agent_call import call_agent
+from .backends import get_backend
 from .build import build as do_build
 from .config import ProjectConfig
 from .docstyle import check_test_docstrings
 from .executor import run_tests
-from .gcov import CoverageReport, collect as gcov_collect
+from .gcov import CoverageReport
 from .runner import AgentRunner
 
 
@@ -323,8 +324,8 @@ async def run_loop(
         baseline_cov_path = baseline_dir / "coverage.json"
     else:
         exec0 = None
-        baseline_cov = gcov_collect(
-            cfg.source_path, cfg.gcov_bin,
+        baseline_cov = get_backend(cfg).collect(
+            cfg,
             include_filter=cfg.include_globs, exclude_filter=cfg.exclude_globs)
         baseline_cov_path = run_dir / "baseline_coverage.json"
         baseline_cov.save(baseline_cov_path)

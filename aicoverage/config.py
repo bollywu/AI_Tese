@@ -26,6 +26,36 @@ DEFAULT_CONFIG_NAME = "aicoverage.toml"
 DEFAULT_INCLUDE_GLOBS = ["src/**/*.c", "src/**/*.cc", "src/**/*.cpp", "src/**/*.cxx"]
 DEFAULT_EXCLUDE_GLOBS = ["deps/**", "third_party/**", "tests/**"]
 
+# 语言 → (源码后缀, include 默认, exclude 默认)。c/cpp 与历史完全一致；
+# go/java 为后端扩展（docs/PLAN_gojava_backend.md）放行配置与源码列举。
+_LANG_DEFAULTS: dict[str, dict] = {
+    "c": {"suffixes": (".c", ".cc", ".cpp", ".cxx"),
+          "include_globs": list(DEFAULT_INCLUDE_GLOBS),
+          "exclude_globs": list(DEFAULT_EXCLUDE_GLOBS)},
+    "cpp": {"suffixes": (".c", ".cc", ".cpp", ".cxx"),
+            "include_globs": list(DEFAULT_INCLUDE_GLOBS),
+            "exclude_globs": list(DEFAULT_EXCLUDE_GLOBS)},
+    "go": {"suffixes": (".go",),
+           "include_globs": ["**/*.go"],
+           "exclude_globs": ["vendor/**", "third_party/**", "tests/**", "**/*_test.go"]},
+    "java": {"suffixes": (".java",),
+             "include_globs": ["**/*.java"],
+             "exclude_globs": ["**/test/**", "**/target/**", "**/build/**",
+                               "**/generated/**", "**/*Test*.java", "**/*Tests*.java"]},
+}
+
+
+def _source_suffixes(language: str) -> tuple:
+    return tuple(_LANG_DEFAULTS.get(language, _LANG_DEFAULTS["c"])["suffixes"])
+
+
+def _default_include_globs(language: str) -> list:
+    return list(_LANG_DEFAULTS.get(language, _LANG_DEFAULTS["c"])["include_globs"])
+
+
+def _default_exclude_globs(language: str) -> list:
+    return list(_LANG_DEFAULTS.get(language, _LANG_DEFAULTS["c"])["exclude_globs"])
+
 
 class ConfigError(SystemExit):
     """Configuration error (fail fast, reported at startup)."""
@@ -119,6 +149,11 @@ class ProjectConfig:
     ut_flags: list[str] = field(default_factory=lambda: ["-O0", "-g", "-Wall"])  # extra unit-test flags
     ut_link_libs: list[str] = field(default_factory=list)   # extra link libs, e.g. ["-lm", "-lpthread"]
     ut_obj_dir: str = ".aicoverage/ut"        # unit-test intermediate dir (relative to source_path; .gcno/.gcda here)
+
+    # ── Language backend extras (Go / Java, optional; used by aicoverage.backends) ──
+    go_coverdir: str = ".aicoverage/coverdata"   # GOCOVERDIR 基准目录（相对 source_path）
+    java_agent: str = ""                         # jacocoagent.jar 绝对路径（[java].jacoco_agent）
+    java_exec_dir: str = ".aicoverage/jacoco"    # jacoco.exec 落点目录（相对 source_path）
 
     # ── CodeGraph (for MR incremental loop: call-graph/diff attribution, all optional) ──
     codegraph_enabled: bool = False
@@ -231,7 +266,7 @@ class ProjectConfig:
         if self.source_path.is_dir():
             all_files = [
                 p for p in self.source_path.rglob("*")
-                if p.is_file() and p.suffix in (".c", ".cc", ".cpp", ".cxx")
+                if p.is_file() and p.suffix in _source_suffixes(self.language)
             ]
             for p in sorted(all_files):
                 rel = p.relative_to(self.source_path).as_posix()
@@ -306,15 +341,19 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
     binary_raw = (build.get("binary") or "").strip()
     binary = Path(binary_raw).expanduser() if binary_raw else None
 
+    proj_language = str(proj.get("language", "c")).lower()
+    go_cfg = raw.get("go", {})
+    java_cfg = raw.get("java", {})
+
     cfg = ProjectConfig(
         config_path=path,
         name=str(proj.get("name") or path.parent.name),
         display_name=str(proj.get("display_name") or proj.get("name") or path.parent.name),
-        language=str(proj.get("language", "c")).lower(),
+        language=proj_language,
         description=str(proj.get("description", "")),
         source_path=source_path,
-        include_globs=list(src.get("include_globs", DEFAULT_INCLUDE_GLOBS)),
-        exclude_globs=list(src.get("exclude_globs", DEFAULT_EXCLUDE_GLOBS)),
+        include_globs=list(src.get("include_globs", _default_include_globs(proj_language))),
+        exclude_globs=list(src.get("exclude_globs", _default_exclude_globs(proj_language))),
         clean_cmd=str(build.get("clean_cmd", "")).strip(),
         build_cmd=str(build.get("build_cmd", "")).strip(),
         binary=binary,
@@ -344,12 +383,18 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
         ut_flags=[str(x) for x in unit.get("flags", ["-O0", "-g", "-Wall"])] or ["-O0", "-g", "-Wall"],
         ut_link_libs=[str(x) for x in unit.get("link_libs", [])],
         ut_obj_dir=str(unit.get("obj_dir", ".aicoverage/ut")).strip() or ".aicoverage/ut",
+        go_coverdir=str(go_cfg.get("coverdir", ".aicoverage/coverdata")).strip() or ".aicoverage/coverdata",
+        java_agent=str(java_cfg.get("jacoco_agent", "")).strip(),
+        java_exec_dir=str(java_cfg.get("exec_dir", ".aicoverage/jacoco")).strip() or ".aicoverage/jacoco",
     )
     if cfg.scan_backend not in ("auto", "ocr", "agent", "off"):
         raise ConfigError(f"❌ scan.backend 必须是 auto/ocr/agent/off，当前: {cfg.scan_backend!r}")
 
-    if cfg.language not in ("c", "cpp"):
-        raise ConfigError(f"❌ project.language 必须是 c 或 cpp，当前: {cfg.language!r}")
+    if cfg.language not in ("c", "cpp", "go", "java"):
+        raise ConfigError(
+            f"❌ project.language 必须是 c/cpp/go/java，当前: {cfg.language!r}（"
+            "c/cpp 走 gcov 后端；go/java 为后端扩展，见 docs/PLAN_gojava_backend.md，"
+            "对应 collect 需安装 go/java 工具链）")
 
     errors = cfg.validate()
     if errors:

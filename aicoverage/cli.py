@@ -163,7 +163,8 @@ def _cmd_build(cfg: ProjectConfig, args) -> int:
 
 
 def _cmd_coverage(cfg: ProjectConfig, args) -> int:
-    from .gcov import collect as gcov_collect, clean_gcda, CoverageReport
+    from .backends import get_backend
+    from .gcov import CoverageReport
 
     if args.run_tests:
         from .executor import run_tests
@@ -172,10 +173,10 @@ def _cmd_coverage(cfg: ProjectConfig, args) -> int:
               f"fail={exec_result.failures} ({exec_result.duration_s:.1f}s)")
         cov_path = exec_result.coverage_path
     else:
-        clean_gcda(cfg.source_path)
-        report = gcov_collect(cfg.source_path, cfg.gcov_bin,
-                              include_filter=cfg.include_globs,
-                              exclude_filter=cfg.exclude_globs)
+        backend = get_backend(cfg)
+        backend.clean(cfg)
+        report = backend.collect(cfg, include_filter=cfg.include_globs,
+                                 exclude_filter=cfg.exclude_globs)
         cov_path = Path(args.out) if args.out else cfg.workspace / "coverage.json"
         report.save(cov_path)
     report = CoverageReport.load(cov_path)

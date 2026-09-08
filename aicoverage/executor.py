@@ -21,8 +21,8 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
+from .backends import get_backend
 from .config import ProjectConfig
-from .gcov import clean_gcda, collect as gcov_collect
 
 
 @dataclass
@@ -122,9 +122,10 @@ def run_tests(
     timeout = timeout or cfg.test_timeout
     assert timeout > 0, "test.timeout 必须为正数（0 的语义是瞬间 kill 而非无限等待）"
 
-    # 1. Clear .gcda so this round's coverage reflects only this round's tests
+    # 1. Clear round counters (gcov: remove .gcda; go: empty GOCOVERDIR; java: delete exec)
+    #    so this round's coverage reflects only this round's tests
     if collect_coverage:
-        clean_gcda(cfg.source_path)
+        get_backend(cfg).clean(cfg)
 
     # 2. pytest
     if test_files:
@@ -165,8 +166,8 @@ def run_tests(
     # ut_dir marks functions covered only by unit-test drivers (E2E-missed) so the
     # report can distinguish coverage sources.
     if collect_coverage:
-        report = gcov_collect(
-            cfg.source_path, cfg.gcov_bin,
+        report = get_backend(cfg).collect(
+            cfg,
             include_filter=cfg.include_globs, exclude_filter=cfg.exclude_globs,
             ut_dir=cfg.ut_obj_path,
         )
