@@ -101,10 +101,12 @@ class GoBackend(CoverageBackend):
             merged = Path(cfg.source_path) / ".aicoverage/cov_merged"
             if merged.exists():
                 shutil.rmtree(merged, ignore_errors=True)
+            merged.mkdir(parents=True, exist_ok=True)
             prof.parent.mkdir(parents=True, exist_ok=True)
-            self._run(cfg, ["tool", "covdata", "merge", "-o", str(merged),
-                            *[str(x) for x in coverdir.iterdir() if x.is_file()]])
-            self._run(cfg, ["tool", "covdata", "textfmt", "-i", str(merged), "-o", str(prof)])
+            self._run(cfg, ["tool", "covdata", "merge",
+                            "-i=" + str(coverdir), "-o=" + str(merged)])
+            self._run(cfg, ["tool", "covdata", "textfmt",
+                            "-i=" + str(merged), "-o=" + str(prof)])
             return prof
 
         # 兜底：单测通道 `go test -coverpkg=... -coverprofile=... <pkgs>`
