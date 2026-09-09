@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ..gcov import CoverageReport, FileCov, FunctionCov
@@ -254,3 +254,34 @@ def parse_coverprofile(profile: Path, cfg, *, include_filter=None,
         # 分支：Go 无分支覆盖语义，留空（cond 由上层 vacuous 处理）
         report.files[rel] = fc
     return report
+
+
+def merge_reports(reports: list[CoverageReport]) -> CoverageReport:
+    """合并多份 Go 覆盖率报告（单测通道 go test 与服务 E2E/covdata 双通道）。
+
+    语义与 C 侧 gcov 采集的 max-merge 一致：逐行取最大计数、函数取最大执行数，
+    保证「任一通道命中即算命中」；denominator 为文件内出现过的行/函数并集。
+    """
+    merged = CoverageReport()
+    for rep in reports:
+        for rel, fc in rep.files.items():
+            out = merged.files.get(rel)
+            if out is None:
+                out = replace(fc, line_counts=dict(fc.line_counts),
+                              functions=dict(fc.functions),
+                              branches=list(fc.branches))
+                merged.files[rel] = out
+            else:
+                # 行：并集 + max
+                for ln, cnt in fc.line_counts.items():
+                    out.line_counts[ln] = max(out.line_counts.get(ln, 0), cnt)
+                # 函数：同名取最大 execution_count/blocks
+                for name, f in fc.functions.items():
+                    prev = out.functions.get(name)
+                    if prev is None or f.execution_count > prev.execution_count:
+                        out.functions[name] = f
+                out.branches.extend(fc.branches)
+    for rel, fc in merged.files.items():
+        fc.lines_total = len(fc.line_counts)
+        fc.lines_hit = sum(1 for v in fc.line_counts.values() if v > 0)
+    return merged
