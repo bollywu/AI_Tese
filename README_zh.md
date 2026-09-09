@@ -65,6 +65,7 @@ cd /path/to/your-project && aicov build
 aicov loop --yes                       # 纯覆盖率驱动
 aicov loop -r "压测脚本参数解析需覆盖边界值" --yes   # 需求驱动
 aicov loop --with-kb --yes             # 闭环前先构建代码知识库（首次推荐）
+aicov loop --resume LOOP_20260821_160000 --yes   # 续跑被中断的 run（从断点 stage 继续）
 
 # 5.5（可选/推荐）单独构建代码知识库（wikirize 方法论适配）
 aicov kb                                # 生成 <source>/wiki/（source-map/entrypoints/
@@ -153,6 +154,7 @@ aicov html --from-json path/to/coverage.json --out ./report
 | `[coverage]` | gcov_bin / func_target / cond_target | gcov 可执行文件；达标线 |
 | `[loop]` | max_iter / no_progress_stop | 最大迭代；连续无增长轮数（早停） |
 | `[llm]` | model / gen_model / max_turns / max_verify_retry | 模型配置；max_turns=单次 agent 最大工具轮次（复杂项目建议 ≥120）；max_verify_retry=verify 失败修复回环次数（复杂项目建议 3） |
+| `[llm]` | max_cost_usd / max_total_tokens | 全局预算闸门（0=不限）：单次闭环累计花费/token 超限即 `early_stop(budget_exhausted)` |
 | `[knowledge]` | kb_dir / badcase_dir / few_shots_dir / prompts_dir | 按项目自备的知识资源；prompts_dir 可整份覆盖内置 prompt |
 | `[guard]` | blocked_commands | 额外命令黑名单（正则，hooks 硬拦截） |
 
@@ -190,7 +192,11 @@ your-project/
 | status | exit_reason | 含义 |
 |--------|-------------|------|
 | done | threshold_met | func/cond 同时达标 |
-| early_stop | max_iter_reached / coverage_ceiling / execute_fail_loop / gen_no_output / verify_fail_exceeded / build_failed | 见 loop_state.json |
+| early_stop | max_iter_reached / coverage_ceiling / execute_fail_loop / gen_no_output / verify_fail_exceeded / build_failed / budget_exhausted | 见 loop_state.json |
+
+> **续跑**：进程被中断后不必从头再来。`aicov loop --resume <run_id>` 复用同一 `run_id`，
+> 按 `loop_state.json` 定位第一个未完成的迭代，再按 `iter_N/` 已落盘的产物定位该轮内
+> 应续跑的 stage（`gap`/`verify`/`execute`），已完成的 stage 幂等跳过。
 
 产物全部落在被测项目的 `.aicoverage/` 下（生成的用例落在 `tests/`）：
 

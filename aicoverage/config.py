@@ -127,6 +127,12 @@ class ProjectConfig:
                                             # verify_fail_exceeded early-stop; bumped to 3)
     permission_mode: str = "bypassPermissions"
 
+    # ── Budget gate (0 = unlimited) ─────────────────────────────
+    # loop 每轮累计各 agent 调用的 cost/token，超限即 early_stop(budget_exhausted)，
+    # 避免"跑满 max_iter × 每个 stage"把预算烧穿（唯一的时间闸门是退避超时，管不住总额）。
+    max_cost_usd: float = 0.0               # [llm].max_cost_usd
+    max_total_tokens: int = 0               # [llm].max_total_tokens
+
     # ── Knowledge resources (all optional) ────────────────────
     kb_dir: Path | None = None               # business knowledge-base dir
     badcase_dir: Path | None = None          # deprecated placeholder: badcases auto-managed
@@ -374,6 +380,8 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
         max_turns=int(llm.get("max_turns", 120)),
         max_verify_retry=int(llm.get("max_verify_retry", 3)),
         permission_mode=str(llm.get("permission_mode", "bypassPermissions")).strip(),
+        max_cost_usd=float(llm.get("max_cost_usd", 0.0)),
+        max_total_tokens=int(llm.get("max_total_tokens", 0)),
         kb_dir=_resolve_dir(path.parent, know.get("kb_dir", "")),
         badcase_dir=_resolve_dir(path.parent, know.get("badcase_dir", "")),
         few_shots_dir=_resolve_dir(path.parent, know.get("few_shots_dir", "")),

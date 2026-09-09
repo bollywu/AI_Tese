@@ -95,7 +95,6 @@ class _RetryBackoffConfig:
 
 
 _backoff_config = _RetryBackoffConfig()
-_backoff_elapsed: dict[str, float] = {}
 _COMPACT_MAX_PER_CALL = 2
 
 
@@ -189,10 +188,16 @@ async def call_agent(
         compact_hook: summary-restart hook on context overflow / high token pressure.
         prompt_override: passthrough to runner.run_agent's full system-prompt replacement
             (for the scan-track gen variant).
+
+    Retry budget is **per call** (per stage): the backoff elapsed time is local to this
+    `call_agent` invocation, so a stage that exhausted its budget in an earlier iteration
+    never poisons later iterations (previously it was a module-global that accumulated
+    across the whole process and permanently disabled retries for that agent).
     """
     result: AgentRunResult | None = None
     attempt = 1
     compact_used = 0
+    backoff_elapsed = 0.0
     while True:
         obs.emit("task.call", run_id, iter_n=iter_n, stage=stage, agent=agent_name,
                  data={"attempt": attempt, "max_retries": max_retries,
@@ -283,14 +288,14 @@ async def call_agent(
         if attempt < max_retries:
             if cls in (FailureClass.RATE_LIMIT, FailureClass.TRANSIENT):
                 delay = _backoff_config.next_delay(attempt, cls)
-                total = _backoff_elapsed.get(agent_name, 0.0) + delay
+                total = backoff_elapsed + delay
                 if total > _backoff_config.total_timeout:
                     obs.emit_recovery("result", run_id, stage=stage, agent=agent_name,
                                       iter_n=iter_n, result="failure", runs_dir=runs_dir,
-                                      reason=f"退避累计时长 {total:.0f}s 超限，放弃重试")
-                    print(f"    ⛔ {agent_name} 退避累计时长超限，放弃重试")
+                                      reason=f"本次调用退避累计 {total:.0f}s 超限，放弃重试")
+                    print(f"    ⛔ {agent_name} 退避累计时长超限（{total:.0f}s），放弃重试")
                     return result
-                _backoff_elapsed[agent_name] = total
+                backoff_elapsed = total
                 obs.emit("task.backoff", run_id, iter_n=iter_n, stage=stage,
                          agent=agent_name, runs_dir=runs_dir,
                          data={"attempt": attempt, "delay_ms": round(delay * 1000),

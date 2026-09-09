@@ -36,6 +36,52 @@ class BuildResult:
         }
 
 
+def is_fresh(cfg: ProjectConfig) -> tuple[bool, str]:
+    """Whether the instrumented artifact can be reused as-is (skip-build / resume 前必校验)。
+
+    复用场景（MR 多批复用首批产物、`--resume` 续跑）必须确认产物没过期，否则
+    覆盖率会建立在"源码已改、插桩产物还是旧的"之上，得到假数据。判定：
+      1. 二进制存在
+      2. 插桩确实生效（gcov 后端看 .gcno；其它后端交 backend.verify_build）
+      3. 没有源码文件比二进制更新（留 1s 容差，规避同秒写入的抖动）
+
+    Returns:
+        (fresh, reason)；fresh=False 时 reason 为空串以外的原因说明。
+    """
+    binary = cfg.binary_path
+    if binary is None or not binary.exists():
+        return False, f"构建产物不存在: {binary}"
+
+    backend = get_backend(cfg)
+    if backend.name == "gcov":
+        from .gcov import find_gcno_files
+        if not find_gcno_files(cfg.source_path):
+            return False, "源码树中没有 .gcno（插桩未生效）"
+    else:
+        errs = backend.verify_build(cfg)
+        if errs:
+            return False, "后端校验未通过：" + "；".join(errs)
+
+    try:
+        bin_mtime = binary.stat().st_mtime
+    except OSError:
+        return False, f"构建产物不可读: {binary}"
+
+    newest: Path | None = None
+    newest_mtime = 0.0
+    for p in cfg.source_files():
+        try:
+            m = p.stat().st_mtime
+        except OSError:
+            continue
+        if m > newest_mtime:
+            newest, newest_mtime = p, m
+    if newest is not None and newest_mtime > bin_mtime + 1.0:
+        return False, (f"源码比产物新：{newest.name} 晚于 {binary.name} "
+                       f"{newest_mtime - bin_mtime:.0f}s")
+    return True, ""
+
+
 def run_shell(cmd: str, cwd: Path, timeout: int = 3600) -> tuple[int, str, float]:
     """Run a shell command, return (rc, merged log, elapsed seconds)."""
     import time

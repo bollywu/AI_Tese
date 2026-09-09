@@ -41,6 +41,75 @@ def _write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+#: 一批未达标时最多二分几层（1 批 -> 2 -> 4）：把"毒丸函数"隔离到最小单元，
+#: 避免单个难覆盖函数拖垮整批（批内其它函数的成果也要保住）。
+MAX_SPLIT_DEPTH = 2
+
+
+def _last_coverage(runs_dir: Path, run_id: str | None) -> Path | None:
+    """取该 run 已完成最后一轮的 coverage.json（作为下一批的基线）。"""
+    if not run_id:
+        return None
+    run_dir = runs_dir / run_id
+    if not run_dir.exists():
+        return None
+    covs = sorted(run_dir.glob("iter_*/coverage.json"),
+                  key=lambda p: int(p.parent.name.split("_")[1]))
+    return covs[-1] if covs else None
+
+
+async def _run_batch(
+    cfg: ProjectConfig,
+    batch: list[tuple[str, str]],
+    *,
+    batch_index: str,
+    func_target: float,
+    cond_target: float,
+    max_iter: int,
+    target_context: str,
+    skip_build: bool,
+    baseline_from: Path | None,
+    quiet: bool,
+    depth: int,
+) -> list[dict]:
+    """跑一个批次；未达标且批内多于 1 个函数时**二分拆批重跑**。
+
+    拆批的动机：批里只要有一个"毒丸函数"（gen 一直空产出 / 永远覆盖不到），
+    整批就被判失败，同批其它函数的成果白白丢掉。二分可以把毒丸隔离到最小单元，
+    其余子批照常达标。父记录保留（split=True）以便报告里看到"拆过批"。
+    """
+    state = await run_loop(
+        cfg,
+        func_target=func_target, cond_target=cond_target,
+        max_iter=max_iter,
+        skip_analyze=True,          # MR mode doesn't need whole-project requirement parsing
+        skip_build=skip_build,      # first batch builds; later batches reuse the instrumented artifacts
+        target_functions=batch,
+        target_context=target_context,
+        baseline_from=baseline_from,
+        quiet=quiet,
+    )
+    rec: dict = {"batch": batch, "batch_index": batch_index, "state": state,
+                 "depth": depth, "split": False}
+    if state.get("status") == "done" or depth >= MAX_SPLIT_DEPTH or len(batch) < 2:
+        return [rec]
+
+    mid = len(batch) // 2
+    rec["split"] = True
+    print(f"  ⚠️ 批次 {batch_index} 未达标（{state.get('exit_reason')}）→ 二分拆批重跑"
+          f"（{len(batch)} → {mid} + {len(batch) - mid}），隔离难覆盖函数")
+    children = []
+    for sub_i, sub in ((1, batch[:mid]), (2, batch[mid:])):
+        children.extend(await _run_batch(
+            cfg, sub, batch_index=f"{batch_index}.{sub_i}",
+            func_target=func_target, cond_target=cond_target,
+            max_iter=max_iter, target_context=target_context,
+            skip_build=True,            # 父批已构建过，子批复用产物
+            baseline_from=baseline_from, quiet=quiet, depth=depth + 1,
+        ))
+    return [rec, *children]
+
+
 async def run_mr_loop(
     cfg: ProjectConfig,
     *,
@@ -148,6 +217,9 @@ async def run_mr_loop(
     if not skip_coverage and batches:
         print(f"▶ [M2] 覆盖轨（{len(batches)} 批，每批独立达标闭环）")
         first = True
+        # 基线在批间复用：上一批最后一轮的覆盖率就是"本批开始前"的真实状态，
+        # 语义正确且省掉每批一次全量 pytest（N 批 ⇒ 从 N 次降到 1 次）。
+        baseline_from: Path | None = None
         for i, batch in enumerate(batches, 1):
             batch_funcs = [f for f in trusted if f.as_target() in batch]
             ctx_lines = []
@@ -163,27 +235,33 @@ async def run_mr_loop(
             target_context = "\n".join(ctx_lines)
             print(f"\n{'=' * 60}\n[MR 覆盖轨 批次 {i}/{len(batches)}] "
                   f"{len(batch)} 个函数\n{'=' * 60}")
-            state = await run_loop(
-                cfg,
+            records = await _run_batch(
+                cfg, batch, batch_index=str(i),
                 func_target=func_target, cond_target=cond_target,
-                max_iter=max_iter,
-                skip_analyze=True,          # MR mode doesn't need whole-project requirement parsing
-                skip_build=not first,       # first batch builds; later batches reuse the instrumented artifacts
-                target_functions=batch,
-                target_context=target_context,
-                quiet=quiet,
+                max_iter=max_iter, target_context=target_context,
+                skip_build=not first, baseline_from=baseline_from,
+                quiet=quiet, depth=0,
             )
-            fm = state.get("final_metrics", {}) or {}
-            summary["coverage_batches"].append({
-                "batch_index": i,
-                "functions": [list(t) for t in batch],
-                "run_id": state.get("run_id"),
-                "status": state.get("status"), "exit_reason": state.get("exit_reason"),
-                "func_pct": fm.get("func_pct"), "cond_pct": fm.get("cond_pct"),
-            })
             first = False
-        done = sum(1 for b in summary["coverage_batches"] if b["status"] == "done")
-        print(f"\n[M2] 覆盖轨完成：{done}/{len(batches)} 批达标")
+            for rec in records:
+                fm = rec["state"].get("final_metrics", {}) or {}
+                summary["coverage_batches"].append({
+                    "batch_index": rec["batch_index"],
+                    "functions": [list(t) for t in rec["batch"]],
+                    "run_id": rec["state"].get("run_id"),
+                    "status": rec["state"].get("status"),
+                    "exit_reason": rec["state"].get("exit_reason"),
+                    "func_pct": fm.get("func_pct"), "cond_pct": fm.get("cond_pct"),
+                    "split_depth": rec["depth"],
+                    "split": bool(rec.get("split")),
+                })
+            last_run = records[-1]["state"].get("run_id") if records else None
+            baseline_from = (_last_coverage(cfg.runs_dir, last_run) or baseline_from)
+        leaves = [b for b in summary["coverage_batches"] if not b.get("split")]
+        done = sum(1 for b in leaves if b.get("status") == "done")
+        print(f"\n[M2] 覆盖轨完成：{done}/{len(leaves)} 批达标"
+              + (f"（{len(summary['coverage_batches']) - len(leaves)} 个父批已拆批重跑）"
+                 if len(summary["coverage_batches"]) != len(leaves) else ""))
 
     # ── [M3] scan track ─────────────────────────────────────────
     scan_result = None
@@ -203,9 +281,11 @@ async def run_mr_loop(
 
     # ── [M4] aggregate report ───────────────────────────────────
     batches_meta = summary.get("coverage_batches", [])
-    done_count = sum(1 for b in batches_meta if b.get("status") == "done")
-    summary["status"] = ("done" if batches_meta and done_count == len(batches_meta)
-                         else ("partial" if batches_meta else "skipped"))
+    # 父批（split=True）只是"拆批前的一次尝试"，最终结论由拆出来的子批决定
+    leaves = [b for b in batches_meta if not b.get("split")]
+    done_count = sum(1 for b in leaves if b.get("status") == "done")
+    summary["status"] = ("done" if leaves and done_count == len(leaves)
+                         else ("partial" if leaves else "skipped"))
     summary["exit_reason"] = ("all_batches_met" if summary["status"] == "done"
                               else "partial_batches_not_met")
     _write_json(master_dir / "mr_summary.json", summary)
@@ -248,16 +328,20 @@ def _write_mr_report(cfg: ProjectConfig, summary: dict, ex: diffextract.DiffExtr
     # coverage track
     batches = summary.get("coverage_batches", [])
     if batches:
-        done = sum(1 for b in batches if b.get("status") == "done")
+        leaves = [b for b in batches if not b.get("split")]
+        done = sum(1 for b in leaves if b.get("status") == "done")
         L += ["## 覆盖轨结果（增量覆盖率）", "",
-              f"{done}/{len(batches)} 批达标。", "",
-              "| # | 函数数 | run_id | status | exit_reason | 增量func% | 增量cond% |",
-              "|---|-------|--------|--------|-------------|----------|----------|"]
+              f"{done}/{len(leaves)} 批达标。", "",
+              "| # | 函数数 | run_id | status | exit_reason | 增量func% | 增量cond% | 备注 |",
+              "|---|-------|--------|--------|-------------|----------|----------|------|"]
         for b in batches:
+            note = "已拆批重跑（结论见子批）" if b.get("split") else (
+                f"拆自批次 {b['batch_index'].rsplit('.', 1)[0]}"
+                if "." in str(b["batch_index"]) else "")
             L.append(
                 f"| {b['batch_index']} | {len(b['functions'])} | `{b.get('run_id', '-')}` | "
                 f"{b.get('status', '-')} | {b.get('exit_reason', '-')} | "
-                f"{b.get('func_pct', '-')} | {b.get('cond_pct', '-')} |")
+                f"{b.get('func_pct', '-')} | {b.get('cond_pct', '-')} | {note} |")
         L.append("")
         unreachable = summary.get("unreachable") or []
         if unreachable:

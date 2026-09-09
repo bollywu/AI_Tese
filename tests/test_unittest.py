@@ -357,9 +357,9 @@ class TestLoopTuning:
         assert cfg.max_verify_retry == 4
 
     def test_manifest_fingerprint_detects_fix_progress(self, tmp_path):
-        """gen 修复后文件内容变化应被 _snapshot_manifest_files / _has_fix_progress 检出。"""
+        """gen 修复后文件内容变化应被 _snapshot_manifest_files / _changed_files 检出。"""
         from aicoverage.config import ProjectConfig
-        from aicoverage.loop import _snapshot_manifest_files, _has_fix_progress
+        from aicoverage.loop import _snapshot_manifest_files, _changed_files
         src = tmp_path / "proj"
         (src / "tests").mkdir(parents=True)
         cfg = ProjectConfig.minimal(src, build_cmd="make", binary="app")
@@ -368,12 +368,12 @@ class TestLoopTuning:
         manifest = {"test_files": ["test_a.py"]}
 
         before = _snapshot_manifest_files(cfg, manifest)
-        assert _has_fix_progress(before, before, manifest) is False, "未改动应无进展"
+        assert _changed_files(before, before) == set(), "未改动应无变化文件"
 
         # gen 修复后内容变化
         f.write_text("def test_a():\n    assert 1 == 1\n", encoding="utf-8")
         after = _snapshot_manifest_files(cfg, manifest)
-        assert _has_fix_progress(before, after, manifest) is True, "修复后应检出进展"
+        assert _changed_files(before, after) == {"test_a.py"}, "修复后应检出变化"
         assert before["test_a.py"] != after["test_a.py"]
 
     def test_manifest_fingerprint_handles_missing_file(self, tmp_path):
@@ -405,9 +405,9 @@ class TestVerifyTiming:
         manifest_path.write_text('{"test_files":["test_a.py"]}', encoding="utf-8")
         (src / "tests" / "test_a.py").write_text("def test_a():\n    pass\n", encoding="utf-8")
 
-        # 直接验证辅助函数在"未变"场景返回 False（loop 据此发诊断）
-        from aicoverage.loop import _snapshot_manifest_files, _has_fix_progress
+        # 直接验证辅助函数在"未变"场景返回空集合（loop 据此发 GEN_FIX_NO_CHANGE 诊断）
+        from aicoverage.loop import _snapshot_manifest_files, _changed_files
         m = {"test_files": ["test_a.py"]}
         before = _snapshot_manifest_files(cfg, m)
         after = _snapshot_manifest_files(cfg, m)
-        assert _has_fix_progress(before, after, m) is False
+        assert _changed_files(before, after) == set()

@@ -6,6 +6,7 @@ Subcommands:
   coverage  collect coverage (optionally run tests first)
   analyze   requirement parsing / source understanding (analyzer-agent, LLM)
   loop      full loop (analyze -> build -> gap -> gen -> verify -> execute -> quality -> ...)
+            --resume RUN_ID 续跑被中断的 run（从断点 stage 继续）
   report    view a run's status / final report
 """
 from __future__ import annotations
@@ -67,6 +68,9 @@ def main() -> int:
     p_loop.add_argument("--max-iter", type=int, default=None)
     p_loop.add_argument("--skip-analyze", action="store_true", help="跳过需求解析（纯覆盖率驱动）")
     p_loop.add_argument("--skip-gap-agent", action="store_true", help="缺口分析降级为确定性裸清单（省 LLM）")
+    p_loop.add_argument("--resume", metavar="RUN_ID", default=None,
+                        help="续跑一个被中断的 run（复用同一 run_id，按 iter_N 已落盘产物"
+                             "从断点 stage 继续；此时 --max-iter 语义为「再跑 N 轮」）")
     p_loop.add_argument("--with-kb", action="store_true",
                         help="闭环前先构建代码知识库（wiki/，wikirize 方法论；已建且完整则跳过）")
     p_loop.add_argument("--yes", "-y", action="store_true", help="跳过启动确认")
@@ -316,8 +320,12 @@ async def _cmd_loop(cfg: ProjectConfig, args) -> int:
     from .loop import run_loop
 
     if not args.yes:
-        print(f"即将启动闭环：项目={cfg.name} func≥{args.func or cfg.func_target}% "
-              f"cond≥{args.cond or cfg.cond_target}% max_iter={args.max_iter or cfg.max_iter}")
+        if args.resume:
+            print(f"即将续跑：run_id={args.resume}"
+                  f"（再跑 {args.max_iter or cfg.max_iter} 轮，已完成的 stage 自动跳过）")
+        else:
+            print(f"即将启动闭环：项目={cfg.name} func≥{args.func or cfg.func_target}% "
+                  f"cond≥{args.cond or cfg.cond_target}% max_iter={args.max_iter or cfg.max_iter}")
         print("将真实调用 LLM 生成/修改用例并执行 pytest，继续? [y/N] ", end="")
         if input().strip().lower() != "y":
             print("已取消")

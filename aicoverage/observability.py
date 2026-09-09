@@ -27,7 +27,7 @@ VALID_EVENT_TYPES = {
     "task.call", "task.return", "task.retry", "task.backoff",
     "hallucination.detected", "context.compact",
     # artifact / coverage / execute
-    "artifact.write", "artifact.missing",
+    "artifact.write", "artifact.missing", "cache.hit",
     "coverage.snapshot", "coverage.delta",
     "execute.completed",
     # build
@@ -56,6 +56,8 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
     "COVERAGE_CEILING":     {"severity": "medium", "title": "覆盖率连续无增长（天花板）"},
     "MISSING_ARTIFACT":     {"severity": "medium", "title": "预期产物缺失"},
     "EARLY_STOP":           {"severity": "low",    "title": "闭环早停"},
+    "GEN_ORPHAN_FILES":     {"severity": "low",    "title": "tests/ 下出现未登记在 manifest 的新用例文件（疑似 gen 重试残留）"},
+    "BUDGET_EXHAUSTED":     {"severity": "medium", "title": "闭环预算（花费/token）耗尽，提前收尾"},
 }
 
 # Observation silence switch (unit tests avoid polluting production runs/ dir)

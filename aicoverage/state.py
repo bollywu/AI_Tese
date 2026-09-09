@@ -91,6 +91,23 @@ def update_iteration(runs_dir: Path, run_id: str, iter_n: int, updates: dict[str
     return state
 
 
+def mark_resumed(runs_dir: Path, run_id: str, start_iter: int, end_iter: int) -> dict:
+    """标记一个 run 进入续跑状态：`--resume` 时复用原 run_id，不重建状态。
+
+    - 抬升 max_iter 到新的绝对上限（CLI 的 --max-iter 在续跑时语义是"再跑 N 轮"）
+    - status/exit_reason 复位为 running（上一次可能是被 kill，停在 running/早停上）
+    - 记录续跑痕迹（起始轮 / 时间），供报告与审计回放
+    """
+    state = load_loop_state(runs_dir, run_id)
+    state.setdefault("limits", {})["max_iter"] = int(end_iter)
+    state["status"] = "running"
+    state["exit_reason"] = ""
+    state["resumed_at"] = datetime.now().isoformat()
+    state["resumed_from_iter"] = int(start_iter)
+    save_loop_state(runs_dir, run_id, state)
+    return state
+
+
 def update_state(runs_dir: Path, run_id: str, updates: dict[str, Any]) -> dict:
     """Update top-level fields (e.g. MR mode writing scope metadata)."""
     state = load_loop_state(runs_dir, run_id)
@@ -129,15 +146,21 @@ def check_early_stop(state: dict) -> str | None:
     - no early stop when current_iter < 2
     - no_progress_iters consecutive rounds with execute_verdict=FAIL -> execute_fail_loop
     - no_progress_iters consecutive rounds with no coverage growth (and execute not FAIL) -> coverage_ceiling
+
+    Rounds where gen produced nothing (`gen_output == "empty"`) are excluded from the
+    no-progress window: loop.py `continue`s right after gen, so such a round has neither
+    `execute_verdict` nor `delta` -- counting it would satisfy every "no progress"
+    predicate vacuously and trigger coverage_ceiling one round too early.
     """
     limits = state["limits"]
     current_iter = state["current_iter"]
     if current_iter >= limits["max_iter"]:
         return "max_iter_reached"
-    if current_iter < 2:
-        return None
     iterations = sorted(state["iterations"], key=lambda x: x["iter"])
-    recent = iterations[-limits["no_progress_iters"]:]
+    effective = [it for it in iterations if it.get("gen_output") != "empty"]
+    if current_iter < 2 or not effective:
+        return None
+    recent = effective[-limits["no_progress_iters"]:]
     if len(recent) >= limits["no_progress_iters"]:
         if all(it.get("execute_verdict") == "FAIL" for it in recent):
             return "execute_fail_loop"
