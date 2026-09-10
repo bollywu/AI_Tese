@@ -14,13 +14,17 @@ Artifact contract (per iter directory):
 """
 from __future__ import annotations
 
+import os
+import shlex
 import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from . import observability as obs
 from .backends import get_backend
 from .config import ProjectConfig
 
@@ -97,6 +101,17 @@ def _parse_junit(junit_path: Path) -> tuple[int, int, int, int]:
         return 0, 0, 0, 0
 
 
+def collect_coverage_artifact(cfg: ProjectConfig, coverage_path: Path) -> Any:
+    """gcov 采集并落盘（宿主机与沙箱容器共用这一份逻辑，保证过滤/ut 标记一致）。"""
+    report = get_backend(cfg).collect(
+        cfg,
+        include_filter=cfg.include_globs, exclude_filter=cfg.exclude_globs,
+        ut_dir=cfg.ut_obj_path,
+    )
+    report.save(coverage_path)
+    return report
+
+
 def run_tests(
     cfg: ProjectConfig,
     iter_dir: Path,
@@ -105,12 +120,16 @@ def run_tests(
     timeout: int | None = None,
     collect_coverage: bool = True,
     python: str | None = None,
+    sandbox: Any | None = None,
 ) -> ExecutionResult:
     """Run pytest (defaults to the whole test_dir), then collect gcov coverage and write artifacts.
 
     Args:
         test_files: run only the given test files (targeted verification after gen); None = full test_dir.
         collect_coverage: whether to run gcov collection after execution.
+        sandbox: 非空时 pytest（以及默认的 gcov 采集）在沙箱内执行；None = 宿主机直跑。
+            被测二进制（harness run_binary）、单测 driver、local_server 都跑在 pytest
+            进程内，随之一起被隔离。
     """
     result = ExecutionResult(verdict="BLOCKED")
     iter_dir.mkdir(parents=True, exist_ok=True)
@@ -118,12 +137,17 @@ def run_tests(
     log_path = iter_dir / "pytest.log"
     coverage_path = iter_dir / "coverage.json"
 
+    in_sandbox = sandbox is not None and sandbox.name != "host"
+    if in_sandbox and not python:
+        # 容器内的解释器不能靠宿主机探测（resolve_python 检查的是宿主机 pytest）
+        python = str(getattr(cfg, "sandbox_python", "python3") or "python3")
     py = python or resolve_python(cfg)
     timeout = timeout or cfg.test_timeout
     assert timeout > 0, "test.timeout 必须为正数（0 的语义是瞬间 kill 而非无限等待）"
 
     # 1. Clear round counters (gcov: remove .gcda; go: empty GOCOVERDIR; java: delete exec)
     #    so this round's coverage reflects only this round's tests
+    #    （.gcda 在挂载共享的源码树里，宿主机删得到，无需进容器）
     if collect_coverage:
         get_backend(cfg).clean(cfg)
 
@@ -137,18 +161,26 @@ def run_tests(
 
     import time
     start = time.time()
-    try:
-        proc = subprocess.run(
-            cmd, cwd=str(cfg.source_path), capture_output=True, text=True,
+    if in_sandbox:
+        res = sandbox.run(
+            shlex.join(cmd), cwd=cfg.source_path, env=_build_env(cfg),
             timeout=timeout,
-            env=_build_env(cfg),
+            network=bool(getattr(cfg, "sandbox_network_test", False)),
         )
-        log = (proc.stdout or "") + ("\n[stderr]\n" + proc.stderr if proc.stderr else "")
-        rc = proc.returncode
-    except subprocess.TimeoutExpired as e:
-        out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-        log = f"TIMEOUT after {timeout}s\n{out}"
-        rc = 124
+        rc, log = res.rc, res.log
+    else:
+        try:
+            proc = subprocess.run(
+                cmd, cwd=str(cfg.source_path), capture_output=True, text=True,
+                timeout=timeout,
+                env=_build_env(cfg),
+            )
+            log = (proc.stdout or "") + ("\n[stderr]\n" + proc.stderr if proc.stderr else "")
+            rc = proc.returncode
+        except subprocess.TimeoutExpired as e:
+            out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+            log = f"TIMEOUT after {timeout}s\n{out}"
+            rc = 124
     result.duration_s = time.time() - start
     log_path.write_text(log, encoding="utf-8")
     result.log_path = log_path
@@ -165,13 +197,33 @@ def run_tests(
     # gcov parsing tolerates incomplete/corrupt .gcda (_read_gcov_json returns None).
     # ut_dir marks functions covered only by unit-test drivers (E2E-missed) so the
     # report can distinguish coverage sources.
+    #
+    # 沙箱模式下默认在容器内采集：.gcda 由容器内的 gcc 运行时写出，宿主机 gcov
+    # 版本一旦不匹配会整轮解析失败；同源采集彻底消除该风险，失败再回退宿主机。
     if collect_coverage:
-        report = get_backend(cfg).collect(
-            cfg,
-            include_filter=cfg.include_globs, exclude_filter=cfg.exclude_globs,
-            ut_dir=cfg.ut_obj_path,
-        )
-        report.save(coverage_path)
+        collected = False
+        if in_sandbox and getattr(cfg, "sandbox_collect_in_container", True):
+            from .sandbox import sandbox_collect_command
+            cres = sandbox.run(
+                sandbox_collect_command(cfg, coverage_path),
+                cwd=cfg.source_path, env=_build_env(cfg),
+                timeout=max(timeout, 600), network=False,
+            )
+            if cres.rc == 0 and coverage_path.exists():
+                collected = True
+            else:
+                # run_id 从 AICOV_RUN_DIR 反推（executor 层不持有 run 上下文）
+                run_dir_env = os.environ.get("AICOV_RUN_DIR", "")
+                obs.emit_diagnostic(
+                    "SANDBOX_COLLECT_FALLBACK",
+                    Path(run_dir_env).name if run_dir_env else "",
+                    runs_dir=Path(run_dir_env).parent if run_dir_env else None,
+                    message=f"容器内 gcov 采集失败（rc={cres.rc}），回退宿主机采集",
+                    context={"log_tail": cres.log[-800:]},
+                )
+                print("      ⚠️ 容器内 gcov 采集失败，回退宿主机采集（注意 gcc/gcov 版本一致性）")
+        if not collected:
+            report = collect_coverage_artifact(cfg, coverage_path)
         result.coverage_path = coverage_path
 
     # 5. verdict

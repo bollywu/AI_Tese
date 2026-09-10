@@ -177,6 +177,24 @@ class ProjectConfig:
                                  # agent: force built-in scan-agent
                                  # off: skip the scan track
 
+    # ── Execution sandbox (确定性执行面隔离；off = 宿主机直跑，行为与旧版一致) ──
+    # 只沙箱化两个入口：插桩构建（build.run_shell）与 pytest+gcov（executor.run_tests）。
+    # harness 的 run_binary/compile_unit_driver/run_driver/local_server 都跑在 pytest
+    # 进程内，随之一起被隔离。agent 的 Bash 不在此列（hooks 层软约束管辖）。
+    # 详见 aicoverage/sandbox.py 模块注释（同路径挂载/gcov 版本耦合两大约束）。
+    sandbox_enabled: bool = False            # [sandbox].enabled（false = 宿主机直跑）
+    sandbox_runtime: str = "auto"            # auto | docker | podman | host
+    sandbox_image: str = "aicoverage-sandbox:latest"   # 通用基础镜像（aicov sandbox 构建）
+    sandbox_network_build: bool = True       # 构建阶段允许网络（拉依赖）
+    sandbox_network_test: bool = False       # 测试阶段默认断网（loopback 仍可用，local_server 不受影响）
+    sandbox_memory: str = "2g"
+    sandbox_cpus: str = "2"
+    sandbox_pids_limit: int = 256
+    sandbox_python: str = "python3"          # 容器内用于 pytest/采集的解释器
+    sandbox_shell: str = "bash"              # 容器内接收 stdin 命令的 shell
+    sandbox_collect_in_container: bool = True  # gcov 采集也在容器内跑（gcc/gcov 须同源）
+    sandbox_extra_args: list[str] = field(default_factory=list)  # 追加 docker run 参数
+
     # ── Runtime cache (not part of config) ────────────────────
     _source_files_cache: list | None = field(default=None, repr=False, compare=False)
 
@@ -343,6 +361,7 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
     codegraph = raw.get("codegraph", {})
     scan = raw.get("scan", {})
     unit = raw.get("unittest", {})
+    sb = raw.get("sandbox", {})
 
     source_path = Path(src.get("path", ".")).expanduser()
     if not source_path.is_absolute():
@@ -402,9 +421,24 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
         go_coverprofile=str(go_cfg.get("coverprofile", ".aicoverage/cover.out")).strip() or ".aicoverage/cover.out",
         java_agent=str(java_cfg.get("jacoco_agent", "")).strip(),
         java_exec_dir=str(java_cfg.get("exec_dir", ".aicoverage/jacoco")).strip() or ".aicoverage/jacoco",
+        sandbox_enabled=bool(sb.get("enabled", False)),
+        sandbox_runtime=str(sb.get("runtime", "auto")).strip() or "auto",
+        sandbox_image=str(sb.get("image", "aicoverage-sandbox:latest")).strip() or "aicoverage-sandbox:latest",
+        sandbox_network_build=bool(sb.get("network_build", True)),
+        sandbox_network_test=bool(sb.get("network_test", False)),
+        sandbox_memory=str(sb.get("memory", "2g")).strip() or "2g",
+        sandbox_cpus=str(sb.get("cpus", "2")).strip() or "2",
+        sandbox_pids_limit=int(sb.get("pids_limit", 256)),
+        sandbox_python=str(sb.get("python", "python3")).strip() or "python3",
+        sandbox_shell=str(sb.get("shell", "bash")).strip() or "bash",
+        sandbox_collect_in_container=bool(sb.get("collect_in_container", True)),
+        sandbox_extra_args=[str(x) for x in sb.get("extra_args", [])],
     )
     if cfg.scan_backend not in ("auto", "ocr", "agent", "off"):
         raise ConfigError(f"❌ scan.backend 必须是 auto/ocr/agent/off，当前: {cfg.scan_backend!r}")
+
+    if cfg.sandbox_runtime not in ("auto", "docker", "podman", "host"):
+        raise ConfigError(f"❌ sandbox.runtime 必须是 auto/docker/podman/host，当前: {cfg.sandbox_runtime!r}")
 
     if cfg.language not in ("c", "cpp", "go", "java"):
         raise ConfigError(

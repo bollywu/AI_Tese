@@ -10,9 +10,11 @@ it only verifies two things:
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .backends import get_backend
 from .config import ProjectConfig
@@ -82,15 +84,24 @@ def is_fresh(cfg: ProjectConfig) -> tuple[bool, str]:
     return True, ""
 
 
-def run_shell(cmd: str, cwd: Path, timeout: int = 3600) -> tuple[int, str, float]:
-    """Run a shell command, return (rc, merged log, elapsed seconds)."""
+def run_shell(cmd: str, cwd: Path, timeout: int = 3600,
+              sandbox: "Any | None" = None,
+              env: dict | None = None) -> tuple[int, str, float]:
+    """Run a shell command, return (rc, merged log, elapsed seconds).
+
+    sandbox 非空时走沙箱后端（DockerSandbox/HostSandbox），否则维持旧版
+    subprocess shell=True 直跑行为。
+    """
     import time
 
     start = time.time()
+    if sandbox is not None:
+        res = sandbox.run(cmd, cwd=cwd, env=env, timeout=timeout)
+        return res.rc, res.log, res.duration_s
     try:
         proc = subprocess.run(
             cmd, shell=True, cwd=str(cwd), capture_output=True, text=True,
-            timeout=timeout,
+            timeout=timeout, env=env,
         )
         log = (proc.stdout or "") + ("\n[stderr]\n" + proc.stderr if proc.stderr else "")
         return proc.returncode, log, time.time() - start
@@ -101,19 +112,22 @@ def run_shell(cmd: str, cwd: Path, timeout: int = 3600) -> tuple[int, str, float
         return 127, f"OSERROR: {e}", time.time() - start
 
 
-def build(cfg: ProjectConfig, *, skip_clean: bool = False, log_dir: Path | None = None) -> BuildResult:
+def build(cfg: ProjectConfig, *, skip_clean: bool = False, log_dir: Path | None = None,
+          sandbox: "Any | None" = None) -> BuildResult:
     """Run the instrumented build and verify it."""
     result = BuildResult(ok=False, binary=cfg.binary_path)
 
     logs: list[str] = []
     if cfg.clean_cmd and not skip_clean:
-        rc, log, dur = run_shell(cfg.clean_cmd, cfg.source_path)
+        rc, log, dur = run_shell(cfg.clean_cmd, cfg.source_path,
+                                 sandbox=sandbox, env=os.environ)
         logs.append(f"$ {cfg.clean_cmd}\n(rc={rc}, {dur:.1f}s)\n{log[-4000:]}")
         if rc != 0:
             # clean failure is not fatal (first build may have nothing to clean)
             logs.append("⚠ clean 命令非零退出（忽略，继续构建）")
 
-    rc, log, dur = run_shell(cfg.build_cmd, cfg.source_path)
+    rc, log, dur = run_shell(cfg.build_cmd, cfg.source_path,
+                             sandbox=sandbox, env=os.environ)
     result.duration_s = dur
     logs.append(f"$ {cfg.build_cmd}\n(rc={rc}, {dur:.1f}s)\n{log[-8000:]}")
     result.log = "\n\n".join(logs)

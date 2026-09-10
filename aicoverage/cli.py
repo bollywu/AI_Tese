@@ -96,6 +96,14 @@ def main() -> int:
                                      "供闭环 agent 导航，降低源码探索成本")
     p_kb.add_argument("--force", action="store_true", help="已有 wiki 也强制重建")
 
+    from .sandbox import DEFAULT_SANDBOX_IMAGE
+    p_sb = sub.add_parser("sandbox", help="执行面沙箱：构建/检查通用基础镜像"
+                                          "（docker/sandbox.Dockerfile，所有项目共享）")
+    p_sb.add_argument("--image", default=DEFAULT_SANDBOX_IMAGE,
+                      help=f"镜像名（默认 {DEFAULT_SANDBOX_IMAGE}）")
+    p_sb.add_argument("--check", action="store_true",
+                      help="只检查 docker/podman 可用性，不构建镜像")
+
     p_report = sub.add_parser("report", help="查看 run 状态/报告")
     p_report.add_argument("run_id", nargs="?", default=None)
     p_report.add_argument("--list", action="store_true", help="列出全部 run")
@@ -125,6 +133,8 @@ def main() -> int:
         return asyncio.run(_cmd_mr(cfg, args))
     if args.command == "kb":
         return asyncio.run(_cmd_kb(cfg, args))
+    if args.command == "sandbox":
+        return _cmd_sandbox(args)
     if args.command == "report":
         return _cmd_report(cfg, args)
     return 1
@@ -155,8 +165,12 @@ def _cmd_init(args) -> int:
 
 def _cmd_build(cfg: ProjectConfig, args) -> int:
     from .build import build as do_build
+    from .sandbox import get_sandbox, is_isolated
 
-    result = do_build(cfg, skip_clean=args.skip_clean)
+    sandbox = get_sandbox(cfg)
+    if is_isolated(sandbox):
+        print(f"🛡️ 执行沙箱：{sandbox.name}（image={getattr(cfg, 'sandbox_image', '')}）")
+    result = do_build(cfg, skip_clean=args.skip_clean, sandbox=sandbox)
     if result.ok:
         print(f"✅ 构建成功：{result.gcno_count} 个插桩单元，产物 {result.binary}")
         return 0
@@ -166,13 +180,46 @@ def _cmd_build(cfg: ProjectConfig, args) -> int:
     return 1
 
 
+def _cmd_sandbox(args) -> int:
+    """构建/检查通用沙箱基础镜像（不依赖项目配置）。"""
+    import subprocess as sp
+    from .sandbox import detect_runtime
+
+    if args.check:
+        from .sandbox import runtime_available
+        for rt in ("docker", "podman"):
+            print(f"  {rt:8s} {'✅ 可用' if runtime_available(rt) else '❌ 不可用'}")
+        rt = detect_runtime()
+        print(f"\nruntime: {rt or '无（沙箱将降级为宿主机直跑）'}")
+        return 0 if rt else 1
+
+    dockerfile = Path(__file__).resolve().parent.parent / "docker" / "sandbox.Dockerfile"
+    if not dockerfile.exists():
+        print(f"❌ 未找到 {dockerfile}")
+        return 1
+    rt = detect_runtime()
+    if not rt:
+        print("❌ 未检测到可用的 docker/podman，无法构建沙箱镜像（`aicov sandbox --check` 查看详情）")
+        return 1
+    print(f"▶ 构建通用沙箱镜像 {args.image}（{rt}，一次性构建、所有项目复用）")
+    proc = sp.run([rt, "build", "-f", str(dockerfile), "-t", args.image,
+                   str(dockerfile.parent)])
+    if proc.returncode == 0:
+        print(f"✅ 镜像就绪：{args.image}\n"
+              f"   在被测项目 aicoverage.toml 里启用：\n"
+              f"   [sandbox]\n   enabled = true")
+    return proc.returncode
+
+
 def _cmd_coverage(cfg: ProjectConfig, args) -> int:
     from .backends import get_backend
     from .gcov import CoverageReport
 
     if args.run_tests:
         from .executor import run_tests
-        exec_result = run_tests(cfg, cfg.workspace / "standalone")
+        from .sandbox import get_sandbox
+        exec_result = run_tests(cfg, cfg.workspace / "standalone",
+                                sandbox=get_sandbox(cfg))
         print(f"pytest: verdict={exec_result.verdict} tests={exec_result.tests} "
               f"fail={exec_result.failures} ({exec_result.duration_s:.1f}s)")
         cov_path = exec_result.coverage_path

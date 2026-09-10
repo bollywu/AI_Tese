@@ -67,6 +67,16 @@ aicov loop -r "压测脚本参数解析需覆盖边界值" --yes   # 需求驱�
 aicov loop --with-kb --yes             # 闭环前先构建代码知识库（首次推荐）
 aicov loop --resume LOOP_20260821_160000 --yes   # 续跑被中断的 run（从断点 stage 继续）
 
+# 5.4（可选）执行面沙箱：把"构建 + pytest + 被测二进制"关进容器
+aicov sandbox                          # 一次性构建通用基础镜像（gcc/python3/pytest，全项目共享）
+aicov sandbox --check                  # 检查 docker/podman 可用性
+#   然后在 aicoverage.toml 里启用：
+#   [sandbox]
+#   enabled = true
+#   说明：同路径 bind mount（gcov 的 .gcno/.gcda 路径编译期固化）；测试阶段默认
+#   --network=none（loopback 仍可用，harness local_server 不受影响）；构建阶段默认
+#   允许网络；runtime 不可用自动降级宿主机直跑并告警
+
 # 5.5（可选/推荐）单独构建代码知识库（wikirize 方法论适配）
 aicov kb                                # 生成 <source>/wiki/（source-map/entrypoints/
                                         #   flows/contracts/verification…）
@@ -157,6 +167,7 @@ aicov html --from-json path/to/coverage.json --out ./report
 | `[llm]` | max_cost_usd / max_total_tokens | 全局预算闸门（0=不限）：单次闭环累计花费/token 超限即 `early_stop(budget_exhausted)` |
 | `[knowledge]` | kb_dir / badcase_dir / few_shots_dir / prompts_dir | 按项目自备的知识资源；prompts_dir 可整份覆盖内置 prompt |
 | `[guard]` | blocked_commands | 额外命令黑名单（正则，hooks 硬拦截） |
+| `[sandbox]` | enabled / runtime / image / network_build / network_test / memory / cpus / pids_limit / python / collect_in_container / extra_args | 执行面沙箱（默认关）。enabled=true 时插桩构建与 pytest+gcov 在容器内执行（同路径挂载，gcov 采集也在容器内保证 gcc/gcov 同源）；先 `aicov sandbox` 构建通用基础镜像，runtime 不可用自动降级宿主机并在 events.jsonl 记 SANDBOX_UNAVAILABLE |
 
 ## 生成的测试约定
 

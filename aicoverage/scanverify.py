@@ -122,6 +122,7 @@ async def run_scan_track(
     diff_text: str,
     *, quiet: bool = False, max_verify_retry: int = 2,
     base_ref: str = "", head_ref: str = "",
+    sandbox=None,
 ) -> dict:
     """扫描轨主流程：scan（ocr 优先 / scan-agent 兜底）→ gen（复现用例）→ verify → execute → 裁决。
 
@@ -130,6 +131,8 @@ async def run_scan_track(
             open-code-review（`ocr review --from --to --format json`）；否则
             降级 scan-agent（自研聚焦扫描）。两通道产出统一 issue 格式，
             下游链路无感知。
+        sandbox: 复现用例的执行沙箱（AI 生成的用例会真实运行被测二进制，
+            与覆盖轨同等风险，必须走同一执行面）。None = 宿主机直跑。
     """
     scan_dir = run_dir / "scan"
     scan_dir.mkdir(parents=True, exist_ok=True)
@@ -249,7 +252,7 @@ async def run_scan_track(
         bug_files = [cfg.test_dir / f for f in manifest.get("test_files", [])
                      if (cfg.test_dir / f).exists()]
         execution = run_tests(cfg, scan_dir, test_files=bug_files or None,
-                              collect_coverage=False)
+                              collect_coverage=False, sandbox=sandbox)
         print(f"      verdict={execution.verdict} tests={execution.tests} "
               f"fail={execution.failures} err={execution.errors}")
         obs.emit("stage.exit", run_id, stage="scan_execute", runs_dir=runs_dir,

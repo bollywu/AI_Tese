@@ -42,6 +42,7 @@ from .docstyle import check_test_docstrings
 from .executor import run_tests
 from .gcov import CoverageReport
 from .runner import AgentRunner
+from .sandbox import get_sandbox, is_isolated
 
 
 # ── Prompt construction ──────────────────────────────────────────────
@@ -412,6 +413,14 @@ async def run_loop(
                    "resume_from_iter": start_iter if prev_state is not None else None})
     os.environ.update(cfg.to_env(run_dir=run_dir))
 
+    # 执行面沙箱（[sandbox].enabled，默认关）：只隔离 build 与 pytest+gcov 两个入口
+    sandbox = get_sandbox(cfg)
+    if is_isolated(sandbox):
+        print(f"  🛡️ 执行沙箱：{sandbox.name}（image={getattr(cfg, 'sandbox_image', '')}）")
+    obs.emit("sandbox.select", run_id, runs_dir=runs_dir,
+             data={"backend": sandbox.name,
+                   "enabled": bool(getattr(cfg, "sandbox_enabled", False))})
+
     # 预算闸门（B4）：累计各 agent 调用的 cost/tokens，超限即 early_stop
     spent = {"cost_usd": 0.0, "total_tokens": 0}
     if prev_state:
@@ -494,7 +503,7 @@ async def run_loop(
     if need_build:
         print("▶ [1] 插桩构建")
         obs.emit("stage.enter", run_id, stage="build", runs_dir=runs_dir)
-        build_res = do_build(cfg, log_dir=run_dir)
+        build_res = do_build(cfg, log_dir=run_dir, sandbox=sandbox)
         if not build_res.ok:
             obs.emit_diagnostic("NO_GCNO" if build_res.gcno_count == 0 else "BUILD_FAIL",
                                 run_id, message=build_res.failure_reason,
@@ -518,7 +527,7 @@ async def run_loop(
         print(f"▶ [2] 基线覆盖率（复用 {baseline_from.name}，跳过全量 pytest）")
     elif existing_tests:
         print(f"▶ [2] 基线覆盖率（已有用例 {len(existing_tests)} 个）")
-        run_tests(cfg, baseline_dir)
+        run_tests(cfg, baseline_dir, sandbox=sandbox)
         baseline_cov_path = baseline_dir / "coverage.json"
     else:
         print("▶ [2] 基线覆盖率（无已有用例，取 gcov 全 0 清单）")
@@ -818,7 +827,7 @@ async def run_loop(
         # [d] execution (deterministic)
         print("  [d] 执行 pytest + gcov 采集")
         obs.emit("stage.enter", run_id, iter_n=iter_n, stage="execute", runs_dir=runs_dir)
-        execution = run_tests(cfg, iter_dir)
+        execution = run_tests(cfg, iter_dir, sandbox=sandbox)
         obs.emit("execute.completed", run_id, iter_n=iter_n, runs_dir=runs_dir,
                  data=execution.to_dict())
         print(f"      verdict={execution.verdict} "

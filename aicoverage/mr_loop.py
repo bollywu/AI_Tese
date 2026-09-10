@@ -33,6 +33,7 @@ from . import observability as obs
 from . import state as st
 from .config import ProjectConfig
 from .loop import run_loop
+from .sandbox import get_sandbox, is_isolated
 from .scanverify import render_scan_markdown, run_scan_track
 
 
@@ -144,6 +145,9 @@ async def run_mr_loop(
     obs.emit("loop.start", master_run_id, runs_dir=cfg.runs_dir,
              data={"trigger": "mr", "base": base_ref, "head": head_ref})
     os.environ.update(cfg.to_env(run_dir=master_dir))
+    sandbox = get_sandbox(cfg)
+    if is_isolated(sandbox):
+        print(f"  🛡️ 执行沙箱：{sandbox.name}（image={getattr(cfg, 'sandbox_image', '')}）")
 
     summary: dict = {
         "master_run_id": master_run_id, "base_ref": base_ref, "head_ref": head_ref,
@@ -272,6 +276,7 @@ async def run_mr_loop(
             changed_functions=[f.to_dict() for f in ex.functions],
             diff_text=ex.diff_text, quiet=quiet,
             base_ref=base_ref, head_ref=head_ref,
+            sandbox=sandbox,
         )
         summary["scan"] = {
             "issues": len(scan_result.get("issues", [])),

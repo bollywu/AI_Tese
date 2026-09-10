@@ -32,6 +32,8 @@ VALID_EVENT_TYPES = {
     "execute.completed",
     # build
     "build.ok", "build.fail",
+    # sandbox（执行面隔离）
+    "sandbox.select", "sandbox.run",
     # diagnostics & recovery
     "diagnostic", "recovery.attempt", "recovery.action", "recovery.result",
     # others
@@ -58,6 +60,8 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
     "EARLY_STOP":           {"severity": "low",    "title": "闭环早停"},
     "GEN_ORPHAN_FILES":     {"severity": "low",    "title": "tests/ 下出现未登记在 manifest 的新用例文件（疑似 gen 重试残留）"},
     "BUDGET_EXHAUSTED":     {"severity": "medium", "title": "闭环预算（花费/token）耗尽，提前收尾"},
+    "SANDBOX_UNAVAILABLE":  {"severity": "medium", "title": "沙箱已启用但 runtime 不可用（降级宿主机直跑）"},
+    "SANDBOX_COLLECT_FALLBACK": {"severity": "medium", "title": "容器内 gcov 采集失败（回退宿主机，注意 gcc/gcov 版本一致性）"},
 }
 
 # Observation silence switch (unit tests avoid polluting production runs/ dir)
