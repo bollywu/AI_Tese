@@ -66,28 +66,28 @@ class TestHostSandbox:
 
 class TestGetSandbox:
     def test_disabled_returns_host(self, tmp_path):
-        cfg = _mk_cfg(tmp_path, sandbox_enabled=True)
+        cfg = _mk_cfg(tmp_path)          # 默认 sandbox_enabled=False
         # runtime 探测被禁用模拟不可用也不影响：enabled=False 直接 Host
         assert get_sandbox(cfg).name == "host"
 
     def test_enabled_but_unavailable_degrades(self, tmp_path, monkeypatch):
         import aicoverage.sandbox as sb
         cfg = _mk_cfg(tmp_path, sandbox_enabled=True)
-        monkeypatch.setattr(sb, "detect_runtime", lambda: None)
+        monkeypatch.setattr(sb, "detect_runtime", lambda *a, **k: None)
         s = sb.get_sandbox(cfg)
         assert s.name == "host" and not is_isolated(s)
 
     def test_enabled_with_runtime(self, tmp_path, monkeypatch):
         import aicoverage.sandbox as sb
         cfg = _mk_cfg(tmp_path, sandbox_enabled=True)
-        monkeypatch.setattr(sb, "detect_runtime", lambda: "docker")
+        monkeypatch.setattr(sb, "detect_runtime", lambda *a, **k: "docker")
         s = sb.get_sandbox(cfg)
         assert isinstance(s, DockerSandbox) and s.name == "docker" and is_isolated(s)
 
     def test_runtime_pref_host_wins(self, tmp_path, monkeypatch):
         import aicoverage.sandbox as sb
         cfg = _mk_cfg(tmp_path, sandbox_enabled=True, sandbox_runtime="host")
-        monkeypatch.setattr(sb, "detect_runtime", lambda: "docker")
+        monkeypatch.setattr(sb, "detect_runtime", lambda *a, **k: "docker")
         assert sb.get_sandbox(cfg).name == "host"
 
 
@@ -171,6 +171,106 @@ class TestRuntimeAvailable:
         monkeypatch.setattr(sb.subprocess, "run", lambda *a, **k: P())
         sb._runtime_cache.clear()
         assert sb.runtime_available("docker") is False
+
+    def test_disk_cache_hit_avoids_probe(self, tmp_path, monkeypatch):
+        import json
+        import aicoverage.sandbox as sb
+        cache = tmp_path / ".aicoverage"
+        cache.mkdir()
+        (cache / "sandbox_runtime_cache.json").write_text(
+            json.dumps({"docker": {"ok": True, "ts": __import__("time").time()}}))
+        sb._runtime_cache.clear()
+
+        def _boom(*a, **k):        # 磁盘缓存命中则不会真的探测
+            raise AssertionError("不应触发探测")
+
+        monkeypatch.setattr(sb.shutil, "which", _boom)
+        assert sb.runtime_available("docker", cache) is True
+
+
+class TestAgentShims:
+    """P4：agent Bash 的编译类命令经 PATH shim 透明转发进容器。"""
+
+    def test_disabled_returns_none(self, tmp_path):
+        import aicoverage.sandbox as sb
+        cfg = _mk_cfg(tmp_path, sandbox_enabled=False)
+        assert sb.ensure_agent_shims(cfg) is None
+
+    def test_opt_out_returns_none(self, tmp_path):
+        import aicoverage.sandbox as sb
+        cfg = _mk_cfg(tmp_path, sandbox_enabled=True, sandbox_agent_shims=False)
+        assert sb.ensure_agent_shims(cfg) is None
+
+    def test_shims_generated_and_executable(self, tmp_path):
+        import aicoverage.sandbox as sb
+        cfg = _mk_cfg(tmp_path, sandbox_enabled=True)
+        shims = sb.ensure_agent_shims(cfg)
+        assert shims is not None and shims.is_dir()
+        for name in ("gcc", "make", "cmake"):
+            script = shims / name
+            assert script.exists()
+            assert script.stat().st_mode & 0o111, f"{name} 应可执行"
+            body = script.read_text(encoding="utf-8")
+            assert "sandbox_shim" in body and name in body
+        # 自定义命令表生效
+        cfg2 = _mk_cfg(tmp_path / "p2", sandbox_enabled=True,
+                       sandbox_agent_shim_commands=["mycc"])
+        sb._shims_cache.clear()
+        shims2 = sb.ensure_agent_shims(cfg2)
+        assert (shims2 / "mycc").exists() and not (shims2 / "gcc").exists()
+
+    def test_interactive_argv_uses_env_cmd_not_stdin(self, tmp_path):
+        """run_pipe 模式：命令经 AICOV_SHIM_CMD 环境变量传入，stdin 留给真实命令。"""
+        s = DockerSandbox(_mk_cfg(tmp_path), runtime="docker")
+        argv = s.build_argv(cwd=tmp_path, env={}, network=False, cmd='gcc -c "a b.c"')
+        joined = " ".join(argv)
+        assert '-e AICOV_SHIM_CMD=gcc -c "a b.c"' in joined
+        assert argv[-3:] == ["bash", "-c", 'eval "$AICOV_SHIM_CMD"']
+        assert argv[-2:] != ["bash", "-s"]
+
+    def test_runner_env_injects_shim_path(self, tmp_path, monkeypatch):
+        """AgentRunner._build_env：沙箱启用时 PATH 前置 shim 目录 + PYTHONPATH。"""
+        from aicoverage.runner import AgentRunner
+        cfg = _mk_cfg(tmp_path, sandbox_enabled=True)
+        shims = str(cfg.workspace / "shims")
+        monkeypatch.setenv("PATH", "/usr/bin")
+        monkeypatch.delenv("PYTHONPATH", raising=False)
+        import aicoverage.sandbox as sb
+        monkeypatch.setattr(sb, "ensure_agent_shims", lambda c: __import__(
+            "pathlib").Path(shims))
+        env = AgentRunner(cfg)._build_env()
+        assert env["PATH"].startswith(shims + ":"), "shim 目录必须前置 PATH"
+        # PYTHONPATH 指向 aicoverage 包根（shim 脚本要能 import aicoverage）
+        import aicoverage as _pkg
+        assert Path(env["PYTHONPATH"]) == Path(_pkg.__file__).resolve().parent.parent
+
+    def test_runner_env_untouched_when_disabled(self, tmp_path, monkeypatch):
+        from aicoverage.runner import AgentRunner
+        cfg = _mk_cfg(tmp_path, sandbox_enabled=False)
+        monkeypatch.setenv("PATH", "/usr/bin")
+        monkeypatch.delenv("PYTHONPATH", raising=False)
+        env = AgentRunner(cfg)._build_env()
+        assert env["PATH"] == "/usr/bin"
+
+    def test_shim_falls_back_to_host_when_not_isolated(self, tmp_path, monkeypatch):
+        """沙箱不可用时，shim 入口 execvp 回退宿主机原样执行。"""
+        import aicoverage.sandbox_shim as shim
+
+        ran: list[list[str]] = []
+
+        def fake_execvp(name, argv):
+            ran.append(list(argv))
+            raise IndexError("模拟 execvp 不返回（真实场景进程已被替换）")
+
+        monkeypatch.setattr(shim, "load_config",
+                            lambda *a, **k: _mk_cfg(tmp_path, sandbox_enabled=True))
+        monkeypatch.setattr(shim, "get_sandbox",
+                            lambda cfg: __import__("aicoverage.sandbox",
+                                                   fromlist=["HostSandbox"]).HostSandbox())
+        monkeypatch.setattr(shim.os, "execvp", fake_execvp)
+        with pytest.raises(IndexError):
+            shim.main(["gcc", "-v"])
+        assert ran and ran[0][:2] == ["gcc", "-v"]
 
 
 if __name__ == "__main__":

@@ -194,6 +194,12 @@ class ProjectConfig:
     sandbox_shell: str = "bash"              # 容器内接收 stdin 命令的 shell
     sandbox_collect_in_container: bool = True  # gcov 采集也在容器内跑（gcc/gcov 须同源）
     sandbox_extra_args: list[str] = field(default_factory=list)  # 追加 docker run 参数
+    # agent Bash 的 PATH shim：编译/构建类命令透明转发进容器（沙箱启用时默认开）。
+    # 低风险命令（ls/grep/cat…）仍在宿主机执行；pytest 本就被 hooks 拦截。
+    sandbox_agent_shims: bool = True
+    sandbox_agent_shim_commands: list[str] = field(default_factory=list)  # 空 = 默认编译类清单
+    sandbox_agent_timeout: int = 1800         # 单条转发命令的超时（秒）
+    sandbox_network_agent: bool = False       # agent 转发命令的网络策略（默认断网）
 
     # ── Runtime cache (not part of config) ────────────────────
     _source_files_cache: list | None = field(default=None, repr=False, compare=False)
@@ -433,6 +439,10 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
         sandbox_shell=str(sb.get("shell", "bash")).strip() or "bash",
         sandbox_collect_in_container=bool(sb.get("collect_in_container", True)),
         sandbox_extra_args=[str(x) for x in sb.get("extra_args", [])],
+        sandbox_agent_shims=bool(sb.get("agent_shims", True)),
+        sandbox_agent_shim_commands=[str(x) for x in sb.get("agent_shim_commands", [])],
+        sandbox_agent_timeout=int(sb.get("agent_timeout", 1800)),
+        sandbox_network_agent=bool(sb.get("network_agent", False)),
     )
     if cfg.scan_backend not in ("auto", "ocr", "agent", "off"):
         raise ConfigError(f"❌ scan.backend 必须是 auto/ocr/agent/off，当前: {cfg.scan_backend!r}")

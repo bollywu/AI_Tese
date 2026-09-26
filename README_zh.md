@@ -76,6 +76,9 @@ aicov sandbox --check                  # 检查 docker/podman 可用性
 #   说明：同路径 bind mount（gcov 的 .gcno/.gcda 路径编译期固化）；测试阶段默认
 #   --network=none（loopback 仍可用，harness local_server 不受影响）；构建阶段默认
 #   允许网络；runtime 不可用自动降级宿主机直跑并告警
+#   agent_shims（默认开）：agent Bash 的编译/构建类命令（gcc/make/cmake…）经 PATH
+#   shim 透明转发进同一容器（stdio 直通）；ls/grep 等低风险命令照常本地跑，
+#   可用 agent_shim_commands 自定义接管清单、agent_shims=false 关闭
 
 # 5.5（可选/推荐）单独构建代码知识库（wikirize 方法论适配）
 aicov kb                                # 生成 <source>/wiki/（source-map/entrypoints/
@@ -167,7 +170,7 @@ aicov html --from-json path/to/coverage.json --out ./report
 | `[llm]` | max_cost_usd / max_total_tokens | 全局预算闸门（0=不限）：单次闭环累计花费/token 超限即 `early_stop(budget_exhausted)` |
 | `[knowledge]` | kb_dir / badcase_dir / few_shots_dir / prompts_dir | 按项目自备的知识资源；prompts_dir 可整份覆盖内置 prompt |
 | `[guard]` | blocked_commands | 额外命令黑名单（正则，hooks 硬拦截） |
-| `[sandbox]` | enabled / runtime / image / network_build / network_test / memory / cpus / pids_limit / python / collect_in_container / extra_args | 执行面沙箱（默认关）。enabled=true 时插桩构建与 pytest+gcov 在容器内执行（同路径挂载，gcov 采集也在容器内保证 gcc/gcov 同源）；先 `aicov sandbox` 构建通用基础镜像，runtime 不可用自动降级宿主机并在 events.jsonl 记 SANDBOX_UNAVAILABLE |
+| `[sandbox]` | enabled / runtime / image / network_build / network_test / memory / cpus / pids_limit / python / shell / collect_in_container / extra_args / agent_shims / agent_shim_commands / agent_timeout / network_agent | 执行面沙箱（默认关）。enabled=true 时插桩构建与 pytest+gcov 在容器内执行（同路径挂载，gcov 采集也在容器内保证 gcc/gcov 同源）；agent_shims=true 时 agent Bash 的编译/构建类命令（gcc/make/cmake…）经 PATH shim 透明转发进同一容器，可用 agent_shim_commands 自定义清单；先 `aicov sandbox` 构建通用基础镜像，runtime 不可用自动降级宿主机并在 events.jsonl 记 SANDBOX_UNAVAILABLE |
 
 ## 生成的测试约定
 

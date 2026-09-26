@@ -108,6 +108,17 @@ class AgentRunner:
             cli_path = _find_codebuddy_cli()
             if cli_path:
                 env["CODEBUDDY_CODE_PATH"] = cli_path
+        # 执行面沙箱启用时：agent Bash 的编译/构建类命令经 PATH shim 透明转发进
+        # 容器（gcc/make/cmake…被同名 shim 截获；ls/grep 等低风险命令照常本地跑；
+        # pytest 仍被 hooks 的 GEN_BLOCKED 先行拦截，二者不冲突）。
+        if getattr(self.cfg, "sandbox_enabled", False):
+            from .sandbox import ensure_agent_shims
+            shims_dir = ensure_agent_shims(self.cfg)
+            if shims_dir is not None:
+                home = str(Path(__file__).parent.parent)
+                env["PATH"] = f"{shims_dir}{os.pathsep}{env.get('PATH', '')}"
+                env["PYTHONPATH"] = (home + os.pathsep + env["PYTHONPATH"]
+                                     if env.get("PYTHONPATH") else home)
         return env
 
     @staticmethod

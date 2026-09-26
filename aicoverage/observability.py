@@ -107,9 +107,14 @@ def _events_path(run_id: str, runs_dir: Path | None) -> Path:
     if runs_dir is not None:
         return runs_dir / run_id / "events.jsonl"
     # fallback: source-dir convention (runs_dir is passed like state.py; normally not reached)
-    from .config import find_config
-    cfg_path = find_config()
-    src = cfg_path.parent
+    from .config import ConfigError, find_config
+    try:
+        cfg_path = find_config()
+        src = cfg_path.parent
+    except ConfigError:
+        # 无配置环境（单测 / agent-bash shim 在任意 cwd 转发）：观测绝不能因
+        # 找不到配置反噬调用方——回退 cwd 约定路径，写不进去也只是丢一条事件。
+        src = Path.cwd()
     return src / ".aicoverage" / "runs" / run_id / "events.jsonl"
 
 

@@ -13,3 +13,6 @@ dist/
 *.gcda
 *.gcno
 *.gcov.json*
+
+# 工具自身的运行时工作区（单测无 runs_dir 时的观测回退路径也会落这里）
+.aicoverage/
