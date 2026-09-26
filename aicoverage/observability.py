@@ -56,6 +56,8 @@ DIAGNOSTIC_CODES: dict[str, dict[str, str]] = {
     "VERIFY_FAIL_EXCEEDED": {"severity": "medium", "title": "verify 失败次数超限"},
     "EXECUTE_FAIL_LOOP":    {"severity": "high",   "title": "连续多轮执行失败"},
     "COVERAGE_CEILING":     {"severity": "medium", "title": "覆盖率连续无增长（天花板）"},
+    "MAX_ITER_REACHED":     {"severity": "low",    "title": "到达最大迭代轮数（未达阈值）"},
+    "GEN_FIX_NO_CHANGE":    {"severity": "low",    "title": "gen 修复回环未改动任何 manifest 文件（疑似空转）"},
     "MISSING_ARTIFACT":     {"severity": "medium", "title": "预期产物缺失"},
     "EARLY_STOP":           {"severity": "low",    "title": "闭环早停"},
     "GEN_ORPHAN_FILES":     {"severity": "low",    "title": "tests/ 下出现未登记在 manifest 的新用例文件（疑似 gen 重试残留）"},

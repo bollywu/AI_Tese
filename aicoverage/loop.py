@@ -936,8 +936,10 @@ async def run_loop(
         early = st.check_early_stop(st.load_loop_state(runs_dir, run_id))
         if early:
             obs.emit("loop.early_stop", run_id, runs_dir=runs_dir, data={"reason": early})
-            obs.emit_diagnostic("EARLY_STOP" if early == "coverage_ceiling" else early.upper(),
-                                run_id, message=early, iter_n=iter_n, runs_dir=runs_dir)
+            # 早停原因与诊断码表一一对应（max_iter_reached/execute_fail_loop/
+            # coverage_ceiling 均为表内稳定码，供消费方按码统计）
+            obs.emit_diagnostic(early.upper(), run_id, message=early,
+                                iter_n=iter_n, runs_dir=runs_dir)
             st.set_exit(runs_dir, run_id, "early_stop", early,
                         {"func_pct": current.func_pct, "cond_pct": current.cond_pct})
             break
