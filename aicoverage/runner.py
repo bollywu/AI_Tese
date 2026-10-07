@@ -26,6 +26,8 @@ from typing import Any
 
 from .config import ProjectConfig
 from .agents import get_agent_tools, load_prompt
+from codebuddy_agent_sdk import CodeBuddySDKClient, CodeBuddyAgentOptions, AppendSystemPrompt
+from .hooks import make_security_hooks
 
 AGENT_DISPATCH_TOOLS = ["Agent", "Task"]
 
@@ -142,8 +144,7 @@ class AgentRunner:
         """prompt_override: fully replace this call's system prompt (e.g. the scan track uses
         scan_gen_agent.md to replace gen-agent's default prompt -- the tool whitelist/hooks
         stay gen-agent's, the semantics become the defect-repro variant). None = load default."""
-        from codebuddy_agent_sdk import CodeBuddySDKClient, CodeBuddyAgentOptions, AppendSystemPrompt
-        from .hooks import make_security_hooks
+        
 
         model = self.cfg.effective_gen_model if agent_name == "gen-agent" else self.cfg.model
 

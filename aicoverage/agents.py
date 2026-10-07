@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from codebuddy_agent_sdk import AgentDefinition
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
@@ -107,7 +108,7 @@ def build_agent_definition(agent_name: str, model: str, prompt: str | None = Non
                            prompts_dir: Path | None = None):
     """Construct an SDK AgentDefinition (for chat/main-orchestrator mode; loop's single-point
     calls use the system_prompt path)."""
-    from codebuddy_agent_sdk import AgentDefinition
+    
 
     return AgentDefinition(
         description=get_description(agent_name),
