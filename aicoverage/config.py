@@ -201,6 +201,10 @@ class ProjectConfig:
     sandbox_agent_timeout: int = 1800         # 单条转发命令的超时（秒）
     sandbox_network_agent: bool = False       # agent 转发命令的网络策略（默认断网）
 
+    # ── Dashboard (Web 看板，只读；可选 extras: fastapi + uvicorn) ──
+    dashboard_host: str = "127.0.0.1"        # [dashboard].host（默认仅本机，对外暴露须显式配置）
+    dashboard_port: int = 8000               # [dashboard].port
+
     # ── Runtime cache (not part of config) ────────────────────
     _source_files_cache: list | None = field(default=None, repr=False, compare=False)
 
@@ -368,6 +372,7 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
     scan = raw.get("scan", {})
     unit = raw.get("unittest", {})
     sb = raw.get("sandbox", {})
+    dash = raw.get("dashboard", {})
 
     source_path = Path(src.get("path", ".")).expanduser()
     if not source_path.is_absolute():
@@ -443,6 +448,8 @@ def load_config(explicit_path: str | None = None) -> ProjectConfig:
         sandbox_agent_shim_commands=[str(x) for x in sb.get("agent_shim_commands", [])],
         sandbox_agent_timeout=int(sb.get("agent_timeout", 1800)),
         sandbox_network_agent=bool(sb.get("network_agent", False)),
+        dashboard_host=str(dash.get("host", "127.0.0.1")).strip() or "127.0.0.1",
+        dashboard_port=int(dash.get("port", 8000)),
     )
     if cfg.scan_backend not in ("auto", "ocr", "agent", "off"):
         raise ConfigError(f"❌ scan.backend 必须是 auto/ocr/agent/off，当前: {cfg.scan_backend!r}")

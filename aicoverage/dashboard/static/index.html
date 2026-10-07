@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AIcoverage 看板</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #1a2129; --border: #2a3441; --text: #d6dde6;
+    --muted: #7d8a99; --accent: #4da3ff; --ok: #3fb950; --warn: #d29922;
+    --err: #f85149; --run: #58a6ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.6 -apple-system,
+         "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; }
+  header { display: flex; align-items: baseline; gap: 12px; padding: 16px 24px;
+           border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 18px; font-weight: 600; }
+  header .proj { color: var(--muted); font-size: 13px; }
+  header .tick { margin-left: auto; color: var(--muted); font-size: 12px; }
+  main { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel);
+          border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--border);
+           white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: #212b36; }
+  tbody tr.sel { background: #24384f; }
+  .mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 13px; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
+  .b-done, .b-success { background: #14301c; color: var(--ok); }
+  .b-running { background: #12293f; color: var(--run); }
+  .b-error, .b-failed { background: #3a1518; color: var(--err); }
+  .b-partial, .b-analyze { background: #33270e; color: var(--warn); }
+  .b-type { background: #242e3a; color: var(--muted); }
+  .muted { color: var(--muted); }
+  #detail { margin-top: 20px; background: var(--panel); border: 1px solid var(--border);
+            border-radius: 8px; padding: 16px 20px; display: none; }
+  #detail h2 { font-size: 15px; margin-bottom: 10px; }
+  #detail pre { background: #0b0f14; border: 1px solid var(--border); border-radius: 6px;
+                padding: 12px; overflow: auto; max-height: 480px; font-size: 12.5px; }
+  .kv { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-bottom: 12px; font-size: 13px; }
+  .kv b { color: var(--muted); font-weight: 500; margin-right: 6px; }
+  .empty { color: var(--muted); text-align: center; padding: 40px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>AIcoverage 看板</h1>
+  <span class="proj" id="proj">加载中…</span>
+  <span class="tick" id="tick"></span>
+</header>
+<main>
+  <table>
+    <thead><tr>
+      <th>Run ID</th><th>类型</th><th>状态</th><th>退出原因</th><th>迭代</th>
+      <th>覆盖率(func/cond)</th><th>成本 / Tokens</th><th>创建时间</th><th>耗时</th>
+    </tr></thead>
+    <tbody id="rows"><tr><td colspan="9" class="empty">加载中…</td></tr></tbody>
+  </table>
+  <div id="detail"></div>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+let selected = null;
+
+const esc = s => String(s ?? "").replace(/[&<>"]/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function badge(status, type) {
+  const s = String(status || "?");
+  let cls = "b-type";
+  if (type === "analyze") cls = "b-analyze";
+  else if (/running/.test(s)) cls = "b-running";
+  else if (/done|success|met/.test(s)) cls = "b-done";
+  else if (/partial|skipped/.test(s)) cls = "b-partial";
+  else if (/error|fail|unknown/.test(s)) cls = "b-error";
+  return `<span class="badge ${cls}">${esc(s)}</span>`;
+}
+
+function fmtDur(sec) {
+  if (sec == null) return "—";
+  if (sec < 60) return sec + "s";
+  const m = Math.floor(sec / 60);
+  return m < 60 ? `${m}m${Math.round(sec % 60)}s` : `${Math.floor(m/60)}h${m%60}m`;
+}
+
+function fmtCov(r) {
+  const fm = r.final_metrics || {};
+  if (fm.func_pct == null) return "—";
+  return `${fm.func_pct}% / ${fm.cond_pct ?? "—"}%`;
+}
+
+function fmtUsage(r) {
+  const u = r.usage;
+  if (!u) return "—";
+  return `$${(u.cost_usd || 0).toFixed(2)} / ${(u.total_tokens || 0).toLocaleString()}`;
+}
+
+function fmtIter(r) {
+  if (r.type === "mr") return r.batch_count != null ? `${r.batch_count} 批` : "—";
+  if (r.current_iter == null) return "—";
+  return `${r.current_iter}${r.max_iter ? " / " + r.max_iter : ""}`;
+}
+
+async function load() {
+  try {
+    const [proj, runs] = await Promise.all([
+      fetch("/api/project").then(r => r.json()),
+      fetch("/api/runs").then(r => r.json()),
+    ]);
+    $("#proj").textContent = `${proj.name} — ${proj.source}`;
+    render(runs);
+    $("#tick").textContent = "已刷新 " + new Date().toLocaleTimeString();
+  } catch (e) {
+    $("#tick").textContent = "刷新失败: " + e.message;
+  }
+}
+
+function render(runs) {
+  const tb = $("#rows");
+  if (!runs.length) {
+    tb.innerHTML = '<tr><td colspan="9" class="empty">暂无 run（先执行 aicov loop / aicov mr）</td></tr>';
+    return;
+  }
+  tb.innerHTML = runs.map(r => `
+    <tr data-id="${esc(r.run_id)}" class="${r.run_id === selected ? "sel" : ""}">
+      <td class="mono">${esc(r.run_id)}</td>
+      <td><span class="badge b-type">${esc(r.type)}</span></td>
+      <td>${badge(r.status, r.type)}</td>
+      <td class="muted">${esc(r.exit_reason || "—")}</td>
+      <td class="mono">${fmtIter(r)}</td>
+      <td class="mono">${fmtCov(r)}</td>
+      <td class="mono">${fmtUsage(r)}</td>
+      <td class="muted">${esc((r.created_at || "").replace("T", " ").slice(0, 19) || "—")}</td>
+      <td class="mono">${fmtDur(r.duration_sec)}</td>
+    </tr>`).join("");
+  tb.querySelectorAll("tr[data-id]").forEach(tr =>
+    tr.addEventListener("click", () => showDetail(tr.dataset.id)));
+}
+
+async function showDetail(runId) {
+  selected = runId;
+  document.querySelectorAll("tbody tr").forEach(tr =>
+    tr.classList.toggle("sel", tr.dataset.id === runId));
+  const box = $("#detail");
+  box.style.display = "block";
+  box.innerHTML = "<h2 class='mono'>" + esc(runId) + "</h2><p class='muted'>加载中…</p>";
+  try {
+    const d = await fetch("/api/runs/" + encodeURIComponent(runId)).then(r => {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    });
+    const raw = d.state || d.summary || {};
+    const kv = [
+      ["状态", d.status], ["退出原因", d.exit_reason || "—"],
+      ["阈值", d.thresholds ? `func≥${d.thresholds.func_pct}% cond≥${d.thresholds.cond_pct}%` : "—"],
+      ["成本", fmtUsage(d)], ["耗时", fmtDur(d.duration_sec)],
+      ...(d.type === "mr" ? [["Base→Head", `${d.base_ref} → ${d.head_ref}`],
+                             ["批次", d.batch_count]] : []),
+    ];
+    box.innerHTML = `<h2 class="mono">${esc(runId)}</h2>
+      <div class="kv">${kv.map(([k, v]) =>
+        `<span><b>${esc(k)}</b>${esc(v)}</span>`).join("")}</div>
+      <pre>${esc(JSON.stringify(raw, null, 2))}</pre>`;
+  } catch (e) {
+    box.innerHTML = `<h2 class="mono">${esc(runId)}</h2>
+      <p class="muted">加载失败: ${esc(e.message)}</p>`;
+  }
+}
+
+load();
+setInterval(load, 3000);
+</script>
+</body>
+</html>

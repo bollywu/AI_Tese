@@ -79,6 +79,10 @@ backend = "auto"             # auto | ocr | agent | off
                               #      npm i -g @alibaba-group/open-code-review)
                               # agent: built-in scan-agent (pure local LLM focused scan)
                               # auto: use ocr if available, else fall back to agent
+
+[dashboard]             # optional: Web 看板（aicov dash，需 pip install 'aicoverage[dashboard]'）
+host = "127.0.0.1"           # 默认仅本机；对外暴露须显式改为 0.0.0.0（看板只读但仍含路径信息）
+port = 8000
 """
 
 CONFTEST_TEMPLATE = '''\

@@ -15,6 +15,7 @@ dependencies = [
 [project.optional-dependencies]
 agent = ["codebuddy-agent-sdk"]
 test = ["pytest"]
+dashboard = ["fastapi>=0.110", "uvicorn>=0.29"]
 
 [project.scripts]
 aicov = "aicoverage.cli:main"
@@ -27,4 +28,4 @@ build-backend = "setuptools.build_meta"
 include = ["aicoverage*"]
 
 [tool.setuptools.package-data]
-aicoverage = ["prompts/*.md", "badcases/*.md", "templates/*"]
+aicoverage = ["prompts/*.md", "badcases/*.md", "templates/*", "dashboard/static/*"]

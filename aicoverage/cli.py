@@ -108,6 +108,13 @@ def main() -> int:
     p_report.add_argument("run_id", nargs="?", default=None)
     p_report.add_argument("--list", action="store_true", help="列出全部 run")
 
+    p_dash = sub.add_parser("dash", help="启动可视化看板（Web Dashboard，只读；"
+                                         "需 pip install 'aicoverage[dashboard]'）")
+    p_dash.add_argument("--host", default=None,
+                        help="绑定地址（默认 [dashboard].host，缺省 127.0.0.1）")
+    p_dash.add_argument("--port", type=int, default=None,
+                        help="端口（默认 [dashboard].port，缺省 8000）")
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -137,6 +144,8 @@ def main() -> int:
         return _cmd_sandbox(args)
     if args.command == "report":
         return _cmd_report(cfg, args)
+    if args.command == "dash":
+        return _cmd_dash(cfg, args)
     return 1
 
 
@@ -456,6 +465,24 @@ def _cmd_report(cfg: ProjectConfig, args) -> int:
         return 1
     print(json.dumps(json.loads(state_file.read_text(encoding="utf-8")),
                      indent=2, ensure_ascii=False))
+    return 0
+
+
+# ── dash ────────────────────────────────────────────────────────────
+
+def _cmd_dash(cfg: ProjectConfig, args) -> int:
+    try:
+        import uvicorn
+        from .dashboard.server import create_app
+    except ImportError:
+        print("❌ 看板依赖未安装，请执行: pip install 'aicoverage[dashboard]'")
+        return 2
+    host = args.host or cfg.dashboard_host
+    port = args.port or cfg.dashboard_port
+    app = create_app(cfg)
+    print(f"▶ AIcoverage 看板: http://{host}:{port}"
+          f"（项目: {cfg.display_name}，runs: {cfg.runs_dir}）")
+    uvicorn.run(app, host=host, port=port, log_level="warning")
     return 0
 
 
